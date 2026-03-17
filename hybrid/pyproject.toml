@@ -1,0 +1,92 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hybrid-rrnco-parco"
+version = "0.1.0"
+description = "Hybrid RRNCO-PARCO: Real-world routing encoder with multi-agent parallel decoding"
+requires-python = ">=3.10"
+readme = "README.md"
+license = "MIT"
+dependencies = [
+    # Core framework
+    "rl4co>=0.5.2",
+
+    # From PARCO
+    "ortools>=9.11.4210",
+    "ipykernel",
+    "huggingface-hub[cli]>=0.30.2",
+
+    # From RRNCO
+    "polyline",
+    "geopy",
+    "folium",
+    "scikit-learn",
+    "matplotlib",
+    "pandas",
+
+    # Local packages (editable installs)
+    # Install with: pip install -e ../parco -e ../real-routing-nco -e .
+]
+
+[project.optional-dependencies]
+dev = ["black", "pre-commit", "ruff", "pytest"]
+solver = [
+    "pyvrp>=0.9.1,<0.10",
+    "ortools>=9.10.4067,<10",
+]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.sdist]
+include = ["hybrid"]
+
+[tool.hatch.build.targets.wheel]
+include = ["hybrid"]
+
+[tool.ruff]
+select = ["F", "E", "W", "I001"]
+line-length = 90
+show-fixes = false
+target-version = "py311"
+task-tags = ["TODO", "FIXME"]
+ignore = ["E501"]
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["E402", "F401"]
+
+[tool.ruff.isort]
+known-first-party = ["hybrid", "parco", "rrnco"]
+known-third-party = []
+section-order = [
+    "future",
+    "standard-library",
+    "third-party",
+    "first-party",
+    "local-folder",
+]
+combine-as-imports = true
+split-on-trailing-comma = false
+lines-between-types = 1
+
+[tool.black]
+line-length = 90
+target-version = ["py311"]
+include = '\.pyi?$'
+exclude = '''
+(
+  /(
+      \.direnv
+    | \.eggs
+    | \.git
+    | \.tox
+    | \.venv
+    | _build
+    | build
+    | dist
+    | venv
+  )/
+)
+'''

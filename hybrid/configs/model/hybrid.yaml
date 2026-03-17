@@ -1,0 +1,7 @@
+_target_: hybrid.models.rl.HybridRLModule
+
+metrics:
+  train: ["loss", "reward", "halting_ratio"]
+  val: ["reward", "halting_ratio"]
+  test: ["reward", "halting_ratio"]
+  log_on_step: True
