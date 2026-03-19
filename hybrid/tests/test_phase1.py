@@ -206,43 +206,71 @@ class TestProjectStructure:
 class TestModelStubs:
     """Test that stub model classes have correct interfaces."""
 
-    def test_encoder_stub_raises(self):
+    def test_encoder_instantiates(self):
         from hybrid.models.encoder import HybridEncoder
 
-        with pytest.raises(NotImplementedError):
-            HybridEncoder()
+        enc = HybridEncoder(
+            embed_dim=32,
+            num_layers=1,
+            feedforward_hidden=64,
+            init_embedding_kwargs=dict(sample_size=5),
+        )
+        assert isinstance(enc, HybridEncoder)
 
-    def test_decoder_stub_raises(self):
+    def test_decoder_instantiates(self):
         from hybrid.models.decoder import HybridDecoder
 
-        with pytest.raises(NotImplementedError):
-            HybridDecoder()
+        dec = HybridDecoder(
+            embed_dim=64, num_heads=4, use_distance_bias=True
+        )
+        assert isinstance(dec, HybridDecoder)
 
-    def test_policy_stub_raises(self):
+    def test_policy_instantiates(self):
         from hybrid.models.policy import HybridPolicy
 
-        with pytest.raises(NotImplementedError):
-            HybridPolicy()
+        policy = HybridPolicy(
+            embed_dim=64,
+            num_heads=8,
+            num_encoder_layers=1,
+            feedforward_hidden=128,
+            init_embedding_kwargs={"sample_size": 5},
+        )
+        assert isinstance(policy, HybridPolicy)
 
-    def test_rl_module_stub_raises(self):
+    def test_rl_module_instantiates(self):
+        from hybrid.envs import HCVRPRealEnv, HCVRPRealGenerator
+        from hybrid.models.policy import HybridPolicy
         from hybrid.models.rl import HybridRLModule
 
-        with pytest.raises(NotImplementedError):
-            HybridRLModule(env=None)
+        gen = HCVRPRealGenerator(
+            num_loc=20, num_agents=5, compute_distance_matrix=True
+        )
+        env = HCVRPRealEnv(generator=gen)
+        policy = HybridPolicy(
+            embed_dim=64,
+            num_heads=8,
+            num_encoder_layers=1,
+            feedforward_hidden=128,
+            init_embedding_kwargs={"sample_size": 5},
+        )
+        module = HybridRLModule(
+            env=env, policy=policy, num_augment=1,
+        )
+        assert isinstance(module, HybridRLModule)
 
-    def test_init_embedding_stub_raises(self):
+    def test_init_embedding_instantiates(self):
         from hybrid.models.env_embeddings.hcvrp_real import (
             HybridInitEmbedding,
         )
 
-        with pytest.raises(NotImplementedError):
-            HybridInitEmbedding()
+        model = HybridInitEmbedding(embed_dim=32, sample_size=5)
+        assert isinstance(model, HybridInitEmbedding)
 
-    def test_env_stub_raises(self):
+    def test_env_instantiates(self):
         from hybrid.envs.hcvrp_real import HCVRPRealEnv
 
-        with pytest.raises(NotImplementedError):
-            HCVRPRealEnv()
+        env = HCVRPRealEnv(generator_params=dict(num_loc=5, num_agents=2))
+        assert env.name == "hcvrp_real"
 
 
 class TestCrossPackageCompatibility:
