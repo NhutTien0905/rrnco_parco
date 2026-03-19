@@ -1,0 +1,4 @@
+rl4co>=0.5.2
+ipykernel
+ortools>=9.11.4210
+huggingface-hub[cli]>=0.30.2
