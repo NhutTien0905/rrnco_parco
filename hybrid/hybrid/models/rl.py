@@ -227,6 +227,10 @@ class HybridRLModule(PARCORLModule):
             )
             loss = loss_ps + self.beta * loss_ss + self.alpha * loss_inv
 
+            # Ensure loss is a tensor (needed when n_aug=1 → all losses are 0)
+            if not isinstance(loss, torch.Tensor):
+                loss = torch.tensor(loss, device=td.device, requires_grad=True)
+
             out.update(
                 {
                     "loss": loss,

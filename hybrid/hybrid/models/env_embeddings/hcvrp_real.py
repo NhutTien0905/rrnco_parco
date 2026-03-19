@@ -173,10 +173,28 @@ class HybridInitEmbedding(nn.Module):
             ..., num_agents:, num_agents:
         ]  # [B, N, N]
 
-        # DistanceExpert → (row_dist_emb, col_dist_emb), each [B, N, H]
+        # Pad distance matrix if N < sample_size (can happen with
+        # curriculum sampling of small problem sizes).  DistanceExpert's
+        # Linear layers expect exactly sample_size input features, so we
+        # pad columns/rows with zeros and let the sorted-gather still work.
+        N = customer_dist.size(-1)
+        sample_size = self.distance_expert.sample_size
+        if N < sample_size:
+            pad_n = sample_size - N
+            # Pad both dims: [B, N, N] → [B, N+pad, N+pad]
+            customer_dist = torch.nn.functional.pad(
+                customer_dist, (0, pad_n, 0, pad_n), value=0.0
+            )
+
+        # DistanceExpert → (row_dist_emb, col_dist_emb), each [B, N_padded, H]
         row_dist_emb, col_dist_emb = self.distance_expert(
             customer_dist, phase
         )
+
+        # Trim back to original N if we padded
+        if N < sample_size:
+            row_dist_emb = row_dist_emb[:, :N, :]
+            col_dist_emb = col_dist_emb[:, :N, :]
 
         # ContextualGating: fuse coordinate + distance
         fused_row = self.gating_network_row(

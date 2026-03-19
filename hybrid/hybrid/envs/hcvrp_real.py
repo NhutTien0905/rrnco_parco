@@ -4,8 +4,10 @@ Extends PARCO's HCVRPEnv to include distance matrices in the TensorDict,
 following RRNCO's pattern for distance normalization and denormalization.
 """
 
+import os
 from typing import Callable, Optional, Union
 
+import numpy as np
 import torch
 
 from parco.envs.hcvrp.env import HCVRPEnv
@@ -67,6 +69,160 @@ class HCVRPRealGenerator(HCVRPGenerator):
             td.set("distance_matrix", distance_matrix)
 
         return td
+
+
+class HCVRPRealWorldGenerator(HCVRPGenerator):
+    """Generator that samples HCVRP instances from real-world OSRM city data.
+
+    Instead of generating random Euclidean coordinates, this generator loads
+    pre-computed distance matrices from RRNCO's city dataset and samples
+    subproblems (depot + customers) from them.
+
+    Data flow per batch:
+        1. Pick a random city from the loaded list
+        2. Sample ``num_loc + 1`` points (1 depot + num_loc customers)
+        3. Extract the distance sub-matrix for those points
+        4. Normalise coordinates to [0, 1]
+        5. Generate random demand, per-agent capacity/speed (from HCVRPGenerator)
+
+    Args:
+        city_data_dir: Path to RRNCO's ``data/dataset/`` folder containing
+            ``{city}/{city}_data.npz`` files.
+        cities_list: List of city names to sample from. If ``None``, loads
+            from ``splited_cities_list.json`` using ``split``.
+        split: Which split to use from ``splited_cities_list.json``
+            (``"train"`` or ``"test"``).  Ignored if ``cities_list`` is given.
+        loc_dist: Sampling strategy — ``"uniform"`` or ``"cluster"``.
+        **kwargs: All arguments from :class:`HCVRPGenerator`
+            (``num_loc``, ``num_agents``, ``min_capacity``, etc.)
+    """
+
+    def __init__(
+        self,
+        city_data_dir: str = "data/dataset",
+        cities_list: Optional[list] = None,
+        split: str = "train",
+        loc_dist: str = "uniform",
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.city_data_dir = city_data_dir
+        self.loc_dist = loc_dist
+
+        # Load city list
+        if cities_list is not None:
+            self.cities = cities_list
+        else:
+            import orjson
+
+            list_path = os.path.join(city_data_dir, "splited_cities_list.json")
+            with open(list_path, "r") as f:
+                all_cities = orjson.loads(f.read())
+            self.cities = all_cities[split]
+
+        # Pre-load all city data into memory for fast sampling
+        self._city_data = {}
+        for city in self.cities:
+            path = os.path.join(city_data_dir, city, f"{city}_data.npz")
+            if not os.path.exists(path):
+                log.warning(f"City data not found: {path}, skipping")
+                continue
+            raw = np.load(path, allow_pickle=True)
+            points = raw["points"]
+            distance = raw["distance"]
+
+            # Remove outlier points (OSRM routing failures)
+            if distance.max() > 1e5:
+                outlier_mask = (
+                    np.any(distance > 1e5, axis=1) | np.any(distance > 1e5, axis=0)
+                )
+                keep = np.where(~outlier_mask)[0]
+                points = points[keep]
+                distance = distance[keep][:, keep]
+
+            n_needed = self.num_loc + 1  # 1 depot + num_loc customers
+            if len(points) < n_needed:
+                log.warning(
+                    f"{city}: only {len(points)} points, need {n_needed}. Skipping."
+                )
+                continue
+
+            self._city_data[city] = {
+                "points": points.astype(np.float32),
+                "distance": distance.astype(np.float32),
+            }
+
+        self._city_names = list(self._city_data.keys())
+        if len(self._city_names) == 0:
+            raise RuntimeError(
+                f"No valid cities found in {city_data_dir} for split={split}"
+            )
+        log.info(
+            f"Loaded {len(self._city_names)} cities for real-world sampling "
+            f"(split={split}, loc_dist={loc_dist})"
+        )
+
+    def _generate(self, batch_size) -> TensorDict:
+        """Generate HCVRP data with real-world OSRM distance matrices.
+
+        Returns TensorDict with:
+            - depot [B, 2], locs [B, N, 2] (normalised)
+            - demand [B, N], capacity [B, m], speed [B, m]
+            - distance_matrix [B, N+1, N+1] (raw, not normalised)
+            - num_agents [B]
+        """
+        if isinstance(batch_size, int):
+            batch_size = [batch_size]
+        B = batch_size[0]
+
+        # ── Sample from real-world cities ──
+        all_points = []
+        all_distance = []
+        rng = np.random.default_rng()
+
+        for _ in range(B):
+            # Pick a random city
+            city = self._city_names[rng.integers(len(self._city_names))]
+            data = self._city_data[city]
+            n_available = len(data["points"])
+            n_needed = self.num_loc + 1
+
+            # Sample indices
+            if self.loc_dist == "cluster":
+                center_idx = rng.integers(n_available)
+                dists = np.linalg.norm(
+                    data["points"] - data["points"][center_idx], axis=1
+                )
+                idx = np.argsort(dists)[:n_needed]
+            else:  # uniform
+                idx = rng.choice(n_available, n_needed, replace=False)
+
+            all_points.append(data["points"][idx])
+            all_distance.append(data["distance"][idx][:, idx])
+
+        # Stack and normalise coordinates
+        points = np.stack(all_points, axis=0)  # [B, N+1, 2]
+        p_min = points.min(axis=1, keepdims=True)
+        p_max = points.max(axis=1, keepdims=True)
+        denom = np.where(p_max - p_min == 0, 1, p_max - p_min)
+        points_norm = (points - p_min) / denom
+
+        depot = torch.tensor(points_norm[:, 0, :], dtype=torch.float32)
+        locs = torch.tensor(points_norm[:, 1:, :], dtype=torch.float32)
+        distance_matrix = torch.tensor(
+            np.stack(all_distance, axis=0), dtype=torch.float32
+        )
+
+        # ── Generate standard HCVRP fields via parent ──
+        # We override locs/depot but need parent for demand, capacity, speed
+        td_parent = super()._generate(batch_size)
+
+        # Replace coordinates with real-world ones
+        td_parent.set("depot", depot)
+        td_parent.set("locs", locs)
+        td_parent.set("distance_matrix", distance_matrix)
+
+        return td_parent
 
 
 class HCVRPRealEnv(HCVRPEnv):

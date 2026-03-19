@@ -1,1 +1,1 @@
-from .hcvrp_real import HCVRPRealEnv, HCVRPRealGenerator
+from .hcvrp_real import HCVRPRealEnv, HCVRPRealGenerator, HCVRPRealWorldGenerator
