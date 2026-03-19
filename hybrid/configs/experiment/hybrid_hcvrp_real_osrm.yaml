@@ -54,7 +54,7 @@ model:
       use_final_norm: true
       parallel_gated_kwargs:
         mlp_activation: "silu"
-  batch_size: 128
+  batch_size: 1
   val_batch_size: ${model.batch_size}
   test_batch_size: ${model.batch_size}
   train_data_size: 100_000
