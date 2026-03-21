@@ -241,4 +241,20 @@ class HybridRLModule(PARCORLModule):
             )
 
         metrics = self.log_metrics(out, phase, dataloader_idx=dataloader_idx)
+
+        # Log SymNCO sub-losses for visibility
+        if phase == "train":
+            for key in ("loss_inv", "loss_ps", "loss_ss"):
+                val = out.get(key, 0)
+                if isinstance(val, torch.Tensor):
+                    val = val.mean()
+                self.log(
+                    f"train/{key}",
+                    val,
+                    on_step=self.log_on_step,
+                    on_epoch=False,
+                    prog_bar=False,
+                    sync_dist=True,
+                )
+
         return {"loss": out.get("loss", None), **metrics}
