@@ -1,0 +1,12 @@
+_target_: hybrid.envs.hcvrp_real.HCVRPRealEnv
+name: hcvrp_real
+
+generator_params:
+  num_loc: 100
+  num_agents: 7
+  compute_distance_matrix: true  # Euclidean distance matrix from sampled coords
+
+data_dir: ${paths.root_dir}/data/hcvrp_real
+
+val_file: null
+test_file: null

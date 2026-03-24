@@ -259,8 +259,12 @@ class HCVRPRealEnv(HCVRPEnv):
         **kwargs,
     ):
         # Build our generator before calling super().__init__
+        # Auto-dispatch to HCVRPRealWorldGenerator when city_data_dir is provided
         if generator is None:
-            generator = HCVRPRealGenerator(**generator_params)
+            if "city_data_dir" in generator_params:
+                generator = HCVRPRealWorldGenerator(**generator_params)
+            else:
+                generator = HCVRPRealGenerator(**generator_params)
         self.normalize_distance = normalize_distance
         # Pass our generator to HCVRPEnv.__init__
         super().__init__(
