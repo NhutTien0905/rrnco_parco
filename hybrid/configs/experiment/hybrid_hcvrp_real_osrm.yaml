@@ -37,12 +37,12 @@ model:
   policy:
     _target_: "hybrid.models.policy.HybridPolicy"
     env_name: "${env.name}"
-    embed_dim: 128
-    num_heads: 8
+    embed_dim: 64
+    num_heads: 4
     # RRNCO encoder params
     num_encoder_layers: 6
     nab_type: "gating"
-    feedforward_hidden: 512
+    feedforward_hidden: 256
     normalization_encoder: "instance"
     # PARCO decoder params
     agent_handler: "highprob"
@@ -54,7 +54,7 @@ model:
       use_final_norm: true
       parallel_gated_kwargs:
         mlp_activation: "silu"
-  batch_size: 1
+  batch_size: 8
   val_batch_size: ${model.batch_size}
   test_batch_size: ${model.batch_size}
   train_data_size: 100_000

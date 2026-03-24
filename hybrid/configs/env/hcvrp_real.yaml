@@ -1,12 +1,18 @@
 _target_: hybrid.envs.hcvrp_real.HCVRPRealEnv
 name: hcvrp_real
+normalize_distance: true
 
 generator_params:
   num_loc: 100
   num_agents: 7
-  compute_distance_matrix: true  # Euclidean distance matrix from sampled coords
+  compute_distance_matrix: true
+  min_loc: 0.0
+  max_loc: 1.0
+  min_demand: 1
+  max_demand: 10
+  min_capacity: 20
+  max_capacity: 41
+  min_speed: 0.5
+  max_speed: 1.0
 
-data_dir: ${paths.root_dir}/data/hcvrp_real
-
-val_file: null
-test_file: null
+data_dir: ${paths.root_dir}/data/${env.name}
