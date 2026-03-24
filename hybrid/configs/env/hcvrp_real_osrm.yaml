@@ -1,0 +1,16 @@
+_target_: hybrid.envs.hcvrp_real.HCVRPRealEnv
+name: hcvrp_real
+
+# Generator uses real-world OSRM city data for training (on-the-fly sampling)
+# HCVRPRealEnv will detect city_data_dir and instantiate HCVRPRealWorldGenerator
+generator_params:
+  num_loc: 100
+  num_agents: 7
+  city_data_dir: ${paths.root_dir}/../real-routing-nco/data/dataset
+  split: train
+  loc_dist: uniform
+
+data_dir: ${paths.root_dir}/data/hcvrp_real
+
+val_file: null
+test_file: null
