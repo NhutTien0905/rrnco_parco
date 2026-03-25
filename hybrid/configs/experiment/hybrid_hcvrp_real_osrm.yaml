@@ -1,25 +1,5 @@
 # @package _global_
 
-# ── Hybrid RRNCO-PARCO: Full Real-World OSRM Training ─────────────────
-# Both training and val/test use real-world OSRM distance matrices.
-# Training samples on-the-fly from city data (train split, 80 cities).
-# Val/Test use pre-generated NPZ files (test split, 20 cities).
-#
-# Prerequisites:
-#   1. RRNCO city data at ../real-routing-nco/data/dataset/
-#   2. Generate val/test files:
-#      cd hybrid
-#      python scripts/generate_real_data.py \
-#          --data_dir ../real-routing-nco/data/dataset \
-#          --output_dir data/hcvrp_real \
-#          --graph_size 100 --dataset_size 1280 --num_agents 7 \
-#          --split train --seed 42 --output_name val_real_n100_m7.npz
-#      python scripts/generate_real_data.py \
-#          --data_dir ../real-routing-nco/data/dataset \
-#          --output_dir data/hcvrp_real \
-#          --graph_size 100 --dataset_size 1280 --num_agents 7 \
-#          --split test --seed 42 --output_name test_real_n100_m7.npz
-
 defaults:
   - override /model: hybrid.yaml
   - override /env: hcvrp_real_osrm.yaml
@@ -38,11 +18,11 @@ model:
     _target_: "hybrid.models.policy.HybridPolicy"
     env_name: "${env.name}"
     embed_dim: 128
-    num_heads: 8
+    num_heads: 4
     # RRNCO encoder params
     num_encoder_layers: 6
     nab_type: "gating"
-    feedforward_hidden: 512
+    feedforward_hidden: 256
     normalization_encoder: "instance"
     # PARCO decoder params
     agent_handler: "highprob"
@@ -54,24 +34,29 @@ model:
       use_final_norm: true
       parallel_gated_kwargs:
         mlp_activation: "silu"
-  batch_size: 1
-  val_batch_size: ${model.batch_size}
-  test_batch_size: ${model.batch_size}
+  # ── Batch sizes ──────────────────────────────────────────────────────
+  # Train: effective batch = batch_size × num_augment = 4 × 4 = 16
+  # Val/test: NO augmentation (see rl.py), so val sees exactly val_batch_size
+  batch_size: 8            # 🔥 restored — val no longer multiplied by n_aug
+  val_batch_size: 1        # ✅ decoupled: small val batch to keep N×N tensors safe
+  test_batch_size: 1
   train_data_size: 100_000
   val_data_size: 10_000
-  test_data_size: 10_000
+  test_data_size: 1_280    # match the file size (1280 instances)
   optimizer_kwargs:
     lr: 2e-4
     weight_decay: 1e-6
   lr_scheduler:
     "MultiStepLR"
   lr_scheduler_kwargs:
-    milestones: [160, 190]
-    gamma: 0.1
-  num_augment: 8
+    milestones: [30, 60]   # 🔥 earlier decay to escape plateau
+    gamma: 0.5             # 🔥 softer decay (was 0.1)
+  num_augment: 4           # 🔥 train-only augmentation (val is unaugmented)
+  alpha: 0.1               # 🔥 reduced SymNCO invariance weight (was 0.2)
+  beta: 0.5                # 🔥 reduced SymNCO symmetricity weight (was 1.0)
   train_min_agents: 3
   train_max_agents: 7
-  train_min_size: 60
+  train_min_size: 80       # 🔥 tighter curriculum (was 60) — less randomness
   train_max_size: 100
 
 # ── Logging ──
@@ -84,7 +69,10 @@ logger:
 
 # ── Trainer ──
 trainer:
-  max_epochs: 200
+  max_epochs: 20
+  # Accumulate 2 steps → effective train batch = 4 × 4 (aug) × 2 = 32
+  # This keeps per-step GPU memory small while giving large effective batch.
+  accumulate_grad_batches: 2
 
 seed: 1234
 

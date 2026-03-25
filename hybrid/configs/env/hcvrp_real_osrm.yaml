@@ -1,16 +1,25 @@
+# Environment config: HCVRP with real-world OSRM distance matrices
+# Uses HCVRPRealWorldGenerator to sample from city data during training
+
 _target_: hybrid.envs.hcvrp_real.HCVRPRealEnv
 name: hcvrp_real
+normalize_distance: true
 
-# Generator uses real-world OSRM city data for training (on-the-fly sampling)
-# HCVRPRealEnv will detect city_data_dir and instantiate HCVRPRealWorldGenerator
-generator_params:
-  num_loc: 100
-  num_agents: 7
+# Use real-world generator that samples from OSRM city data
+generator:
+  _target_: hybrid.envs.hcvrp_real.HCVRPRealWorldGenerator
   city_data_dir: ${paths.root_dir}/../real-routing-nco/data/dataset
   split: train
   loc_dist: uniform
+  num_loc: 100
+  num_agents: 7
+  min_demand: 1
+  max_demand: 10
+  min_capacity: 20
+  max_capacity: 41
+  min_speed: 0.5
+  max_speed: 1.0
+
+generator_params: {}
 
 data_dir: ${paths.root_dir}/data/hcvrp_real
-
-val_file: null
-test_file: null

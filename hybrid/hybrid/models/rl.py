@@ -101,6 +101,12 @@ class HybridRLModule(PARCORLModule):
       agent/size subsampling during training.
     - Default hyperparameters tuned for the deeper RRNCO encoder
       (see ``plan.md`` Phase 7 table).
+    - **Reward shaping**: adds a ``-remaining_nodes_ratio`` term to provide
+      dense per-step signal (controlled by ``reward_shaping_coeff``).
+    - **Entropy bonus**: adds ``-entropy_coeff * entropy`` to the loss to
+      encourage exploration and prevent premature policy collapse.
+    - **Multi-start**: supports ``num_starts > 1`` for escaping local optima
+      (activates ``loss_ps`` — problem symmetricity loss).
 
     Everything else — SymNCO losses, symmetric augmentation, projection
     head, curriculum-style agent/size sampling, multi-dataloader
@@ -110,13 +116,17 @@ class HybridRLModule(PARCORLModule):
         env: The :class:`HCVRPRealEnv` (or compatible) environment.
         policy: A :class:`HybridPolicy` (or compatible).  If ``None``,
             a default :class:`HybridPolicy` is built.
-        num_augment: Number of symmetric augmentations (default 8).
-        alpha: Weight for invariance loss (default 0.2).
-        beta: Weight for solution symmetricity loss (default 1.0).
+        num_augment: Number of symmetric augmentations (default 4).
+        alpha: Weight for invariance loss (default 0.1).
+        beta: Weight for solution symmetricity loss (default 0.5).
         train_min_agents: Min agents sampled per training step.
         train_max_agents: Max agents sampled per training step.
         train_min_size: Min customer locations sampled per training step.
         train_max_size: Max customer locations sampled per training step.
+        reward_shaping_coeff: Weight for the ``remaining_nodes_ratio`` penalty
+            in the shaped reward.  Set to 0.0 to disable (default 0.05).
+        entropy_coeff: Weight for the entropy bonus term in the loss.
+            Set to 0.0 to disable (default 0.01).
         **kwargs: Forwarded to :class:`PARCORLModule` → SymNCO →
             REINFORCE → RL4COLitModule.  Useful keys include
             ``optimizer_kwargs``, ``lr_scheduler``, ``batch_size``, etc.
@@ -127,17 +137,23 @@ class HybridRLModule(PARCORLModule):
         env: RL4COEnvBase,
         policy: Optional[nn.Module] = None,
         # ── SymNCO / augmentation ────────────────────────────────
-        num_augment: int = 8,
-        alpha: float = 0.2,
-        beta: float = 1.0,
+        num_augment: int = 4,
+        alpha: float = 0.1,
+        beta: float = 0.5,
         # ── Curriculum sampling ──────────────────────────────────
         train_min_agents: int = 5,
         train_max_agents: int = 15,
         train_min_size: int = 50,
         train_max_size: int = 100,
+        # ── Reward shaping ───────────────────────────────────────
+        reward_shaping_coeff: float = 0.05,
+        # ── Entropy bonus ────────────────────────────────────────
+        entropy_coeff: float = 0.01,
         # ── Rest ─────────────────────────────────────────────────
         **kwargs,
     ):
+        self.reward_shaping_coeff = reward_shaping_coeff
+        self.entropy_coeff = entropy_coeff
         # Build default policy if none provided
         if policy is None:
             log.info("Building default HybridPolicy for HybridRLModule")
@@ -162,15 +178,19 @@ class HybridRLModule(PARCORLModule):
         """Override to use :func:`resample_batch_hybrid` instead of
         PARCO's :func:`resample_batch`.
 
-        The only change is the resample call — everything else
-        (augmentation, policy call, SymNCO losses, logging) is
-        delegated to the parent.
+        Enhancements over the parent:
+        - Reward shaping: adds ``-reward_shaping_coeff * remaining_nodes_ratio``
+          to give the policy a denser learning signal.
+        - Entropy bonus: subtracts ``entropy_coeff * mean_entropy`` from the
+          loss to prevent premature policy collapse.
+        - Multi-start: activates ``loss_ps`` when ``num_starts > 1``.
         """
         from random import randint
 
         from rl4co.data.transforms import StateAugmentation
         from rl4co.models.zoo.symnco.losses import (
             invariance_loss,
+            problem_symmetricity_loss,
             solution_symmetricity_loss,
         )
         from rl4co.utils.ops import unbatchify
@@ -195,10 +215,14 @@ class HybridRLModule(PARCORLModule):
         # ── Env reset ────────────────────────────────────────────
         td = self.env.reset(batch)
 
-        n_aug, n_start = self.num_augment, self.num_starts
-        assert n_start <= 1, "PARCO does not support multi-start"
+        # Augmentation is a training-only trick (SymNCO).
+        # At val/test we decode greedily on the original instance to
+        # avoid multiplying the batch by n_aug and causing OOM on the
+        # [B, N, N, H] tensors inside AttnFreeNet.
+        n_aug = self.num_augment if phase == "train" else 1
+        n_start = self.num_starts
 
-        # ── Symmetric augmentation ───────────────────────────────
+        # ── Symmetric augmentation (train only) ──────────────────
         if n_aug > 1:
             td = self.augment(td)
 
@@ -213,19 +237,46 @@ class HybridRLModule(PARCORLModule):
         # Unbatchify reward to [batch_size, n_start, n_aug]
         reward = unbatchify(out["reward"], (n_start, n_aug))
 
-        # ── Training loss (SymNCO) ───────────────────────────────
+        # ── Training loss (SymNCO + shaping + entropy) ───────────
         if phase == "train":
             ll = unbatchify(out["log_likelihood"], (n_start, n_aug))
 
+            # ── 🔥 Reward shaping ────────────────────────────────
+            # Penalise having many unvisited nodes at episode end.
+            # ``visited_count`` is in [0, num_locs]; normalise to [0, 1].
+            shaped_reward = reward.clone()
+            if self.reward_shaping_coeff > 0 and "visited_count" in out:
+                visited = out["visited_count"].float()  # [B*n_start*n_aug]
+                visited = unbatchify(visited, (n_start, n_aug))
+                total_nodes = float(num_locs)
+                remaining_ratio = (total_nodes - visited) / total_nodes
+                shaped_reward = reward - self.reward_shaping_coeff * remaining_ratio
+
             proj_embeds = self.projection_head(out["init_embeds"])
             loss_inv = invariance_loss(proj_embeds, n_aug) if n_aug > 1 else 0
-            loss_ps = 0  # no multi-start → no problem symmetricity loss
+
+            # ── 🔥 Multi-start loss_ps ───────────────────────────
+            loss_ps = (
+                problem_symmetricity_loss(shaped_reward, ll, dim=2)
+                if n_start > 1
+                else 0
+            )
+
             loss_ss = (
-                solution_symmetricity_loss(reward[..., None], ll, dim=1)
+                solution_symmetricity_loss(shaped_reward[..., None], ll, dim=1)
                 if n_aug > 1
                 else 0
             )
             loss = loss_ps + self.beta * loss_ss + self.alpha * loss_inv
+
+            # ── 🔥 Entropy bonus ─────────────────────────────────
+            # log_likelihood is the sum of log-probs; approximate entropy as
+            # the negative mean of the per-action log-probs.
+            if self.entropy_coeff > 0:
+                # ll shape: [B, n_start, n_aug]  (sum of log-probs per route)
+                # Entropy proxy: -mean(ll) — higher (less negative) ll → lower entropy
+                entropy_bonus = -ll.mean()
+                loss = loss - self.entropy_coeff * entropy_bonus
 
             # Ensure loss is a tensor (needed when n_aug=1 → all losses are 0)
             if not isinstance(loss, torch.Tensor):
@@ -251,6 +302,18 @@ class HybridRLModule(PARCORLModule):
                 self.log(
                     f"train/{key}",
                     val,
+                    on_step=self.log_on_step,
+                    on_epoch=False,
+                    prog_bar=False,
+                    sync_dist=True,
+                )
+
+            # Log entropy bonus separately
+            if self.entropy_coeff > 0:
+                ll_raw = unbatchify(out["log_likelihood"], (n_start, n_aug))
+                self.log(
+                    "train/entropy_proxy",
+                    -ll_raw.mean(),
                     on_step=self.log_on_step,
                     on_epoch=False,
                     prog_bar=False,
