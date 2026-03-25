@@ -1,5 +1,9 @@
 from typing import List, Optional, Tuple
 
+import os
+# Reduce CUDA memory fragmentation from large [B,N,N,E] tensors in AttnFreeNet
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import hydra
 import lightning as L
 import pyrootutils
