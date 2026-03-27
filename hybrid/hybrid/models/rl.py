@@ -220,17 +220,23 @@ class HybridRLModule(PARCORLModule):
         # avoid multiplying the batch by n_aug and causing OOM on the
         # [B, N, N, H] tensors inside AttnFreeNet.
         n_aug = self.num_augment if phase == "train" else 1
-        n_start = self.num_starts
+        # Multi-start is train-only: at val/test use greedy (n_start=1)
+        # so that unbatchify(reward, (n_start, n_aug)) always matches the
+        # actual output size returned by the policy.
+        n_start = self.num_starts if phase == "train" else 1
 
         # ── Symmetric augmentation (train only) ──────────────────
         if n_aug > 1:
             td = self.augment(td)
 
         # ── Policy forward ───────────────────────────────────────
+        # Pass num_starts only during training so the policy actually
+        # performs multi-start decoding (expands the batch internally).
         out = self.policy(
             td,
             self.env,
             phase=phase,
+            num_starts=n_start if phase == "train" else 1,
             return_init_embeds=True,
         )
 
@@ -239,7 +245,12 @@ class HybridRLModule(PARCORLModule):
 
         # ── Training loss (SymNCO + shaping + entropy) ───────────
         if phase == "train":
-            ll = unbatchify(out["log_likelihood"], (n_start, n_aug))
+            # out["log_likelihood"]: [B*n_start*n_aug, num_agents, (decode_len)]
+            # After unbatchify: [B, n_start, n_aug, num_agents, ...]
+            # Sum over all trailing dims (agents + steps) → [B, n_start, n_aug]
+            # so that ll matches reward for the SymNCO loss functions.
+            ll_raw = unbatchify(out["log_likelihood"], (n_start, n_aug))
+            ll = ll_raw.sum(dim=tuple(range(3, ll_raw.dim())))
 
             # ── 🔥 Reward shaping ────────────────────────────────
             # Penalise having many unvisited nodes at episode end.
@@ -256,14 +267,17 @@ class HybridRLModule(PARCORLModule):
             loss_inv = invariance_loss(proj_embeds, n_aug) if n_aug > 1 else 0
 
             # ── 🔥 Multi-start loss_ps ───────────────────────────
+            # reward: [B, n_start, n_aug] — average over n_start (dim=1)
             loss_ps = (
-                problem_symmetricity_loss(shaped_reward, ll, dim=2)
+                problem_symmetricity_loss(shaped_reward, ll, dim=1)
                 if n_start > 1
                 else 0
             )
 
+            # ── loss_ss (augmentation symmetricity) ─────────────
+            # reward: [B, n_start, n_aug] — average over n_aug (dim=2)
             loss_ss = (
-                solution_symmetricity_loss(shaped_reward[..., None], ll, dim=1)
+                solution_symmetricity_loss(shaped_reward, ll, dim=2)
                 if n_aug > 1
                 else 0
             )
@@ -310,10 +324,9 @@ class HybridRLModule(PARCORLModule):
 
             # Log entropy bonus separately
             if self.entropy_coeff > 0:
-                ll_raw = unbatchify(out["log_likelihood"], (n_start, n_aug))
                 self.log(
                     "train/entropy_proxy",
-                    -ll_raw.mean(),
+                    -ll.mean(),
                     on_step=self.log_on_step,
                     on_epoch=False,
                     prog_bar=False,

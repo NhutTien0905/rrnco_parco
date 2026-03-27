@@ -18,7 +18,7 @@ model:
     _target_: "hybrid.models.policy.HybridPolicy"
     env_name: "${env.name}"
     embed_dim: 128
-    num_heads: 4
+    num_heads: 8
     # RRNCO encoder params
     num_encoder_layers: 6
     nab_type: "gating"
@@ -52,6 +52,7 @@ model:
     milestones: [30, 60]   # 🔥 earlier decay to escape plateau
     gamma: 0.5             # 🔥 softer decay (was 0.1)
   num_augment: 4           # 🔥 train-only augmentation (val is unaugmented)
+  num_starts: 8            # 🔥 multiple start nodes to activate SymNCO losses (was 1)
   alpha: 0.1               # 🔥 reduced SymNCO invariance weight (was 0.2)
   beta: 0.5                # 🔥 reduced SymNCO symmetricity weight (was 1.0)
   train_min_agents: 3
@@ -69,7 +70,7 @@ logger:
 
 # ── Trainer ──
 trainer:
-  max_epochs: 20
+  max_epochs: 100
   # Accumulate 2 steps → effective train batch = 4 × 4 (aug) × 2 = 32
   # This keeps per-step GPU memory small while giving large effective batch.
   accumulate_grad_batches: 2
