@@ -200,6 +200,11 @@ class HybridPolicy(PARCOPolicy):
         if "sampling" not in decode_type:
             num_samples = 1
 
+        # num_starts is a training-only RL concept (used in shared_step for
+        # SymNCO loss_ps). PARCODecodingStrategy does not know about it, so
+        # we must strip it here before forwarding kwargs to the strategy.
+        decoding_kwargs.pop("num_starts", None)
+
         num_agents = td["action_mask"].shape[-2]
 
         decode_strategy: PARCODecodingStrategy = parco_get_decoding_strategy(

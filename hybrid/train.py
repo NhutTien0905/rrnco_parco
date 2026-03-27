@@ -11,9 +11,14 @@ import torch
 
 from lightning import Callback, LightningModule
 from lightning.pytorch.loggers import Logger
-from omegaconf import DictConfig
+from omegaconf import DictConfig, ListConfig
 from rl4co import utils
 from rl4co.utils import RL4COTrainer
+
+# PyTorch 2.6+ changed weights_only=True by default in torch.load.
+# Checkpoints saved with OmegaConf/Hydra configs require DictConfig and ListConfig
+# to be explicitly allowlisted as safe globals.
+torch.serialization.add_safe_globals([DictConfig, ListConfig])
 
 pyrootutils.setup_root(__file__, indicator=".gitignore", pythonpath=True)
 
