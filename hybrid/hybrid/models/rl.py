@@ -408,7 +408,10 @@ class HybridRLModule(PARCORLModule):
                 )
 
         # ── 📊 Enhanced diagnostic metrics ────────────────────────
-        self._log_diagnostic_metrics(td, out, phase, dataloader_idx)
+        # Use terminal state (after full decode) instead of reset state,
+        # so that current_length, visited, etc. reflect the completed episode.
+        final_td = out.get("final_td", td)
+        self._log_diagnostic_metrics(final_td, out, phase, dataloader_idx)
 
         return {"loss": out.get("loss", None), **metrics}
 

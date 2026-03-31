@@ -293,6 +293,7 @@ class HybridPolicy(PARCOPolicy):
                 return_sum_log_likelihood,
             ),
             "halting_ratio": halting_ratio,
+            "final_td": td,  # terminal state for diagnostic metrics
         }
 
         if return_actions:
