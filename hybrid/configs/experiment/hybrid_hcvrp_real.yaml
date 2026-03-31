@@ -68,13 +68,15 @@ model:
   val_data_size: 10_000
   test_data_size: 10_000
   optimizer_kwargs:
-    lr: 2e-4
+    lr: 1e-4       # Reduced from 2e-4 to prevent NaN from large early gradients
     weight_decay: 1e-6
   lr_scheduler:
     "MultiStepLR"
   lr_scheduler_kwargs:
     milestones: [160, 190]
     gamma: 0.1
+  lr_scheduler_interval: "epoch"
+  warmup_epochs: 1   # Linear LR warmup over first epoch (handled in HybridRLModule)
   num_augment: 8
   train_min_agents: 3
   train_max_agents: ${env.generator_params.num_agents}

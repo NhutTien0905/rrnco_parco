@@ -15,6 +15,7 @@ Training loop (inherited from PARCORLModule):
 import torch
 import torch.nn as nn
 
+from torch.optim.lr_scheduler import LinearLR, SequentialLR
 from typing import Any, Optional
 
 from rl4co.envs.common.base import RL4COEnvBase
@@ -127,6 +128,9 @@ class HybridRLModule(PARCORLModule):
             in the shaped reward.  Set to 0.0 to disable (default 0.05).
         entropy_coeff: Weight for the entropy bonus term in the loss.
             Set to 0.0 to disable (default 0.01).
+        warmup_epochs: Number of epochs to linearly warm up the LR from
+            0 → base_lr.  Helps prevent NaN logits from large gradients at
+            initialisation.  Set to 0 to disable (default 1).
         **kwargs: Forwarded to :class:`PARCORLModule` → SymNCO →
             REINFORCE → RL4COLitModule.  Useful keys include
             ``optimizer_kwargs``, ``lr_scheduler``, ``batch_size``, etc.
@@ -149,11 +153,14 @@ class HybridRLModule(PARCORLModule):
         reward_shaping_coeff: float = 0.05,
         # ── Entropy bonus ────────────────────────────────────────
         entropy_coeff: float = 0.01,
+        # ── LR warmup ────────────────────────────────────────────
+        warmup_epochs: int = 1,
         # ── Rest ─────────────────────────────────────────────────
         **kwargs,
     ):
         self.reward_shaping_coeff = reward_shaping_coeff
         self.entropy_coeff = entropy_coeff
+        self.warmup_epochs = warmup_epochs
         # Build default policy if none provided
         if policy is None:
             log.info("Building default HybridPolicy for HybridRLModule")
@@ -171,6 +178,66 @@ class HybridRLModule(PARCORLModule):
             train_max_size=train_max_size,
             **kwargs,
         )
+
+    def configure_optimizers(self):
+        """Override to prepend a linear LR warmup before the parent scheduler.
+
+        The parent (RL4COLitModule) returns one of:
+          - A bare ``optimizer``              (no LR scheduler configured)
+          - ``([optimizer], scheduler_cfg)``  (tuple when scheduler is set)
+
+        If ``warmup_epochs <= 0`` the parent behaviour is unchanged.
+        """
+        result = super().configure_optimizers()
+
+        if self.warmup_epochs <= 0:
+            return result
+
+        # ── Unpack parent result ──────────────────────────────────────
+        # Case 1: ([optimizer], {scheduler_cfg})  ← tuple returned by parent
+        if isinstance(result, tuple) and len(result) == 2:
+            optimizer_list, main_scheduler_cfg = result
+            optimizer = optimizer_list[0] if isinstance(optimizer_list, list) else optimizer_list
+        # Case 2: bare optimizer (no scheduler configured)
+        elif isinstance(result, torch.optim.Optimizer):
+            optimizer = result
+            main_scheduler_cfg = None
+        else:
+            # Fallback: unknown shape, return as-is
+            log.warning("configure_optimizers: unrecognised parent result shape, skipping warmup")
+            return result
+
+        # ── Build linear warmup: LR ramps 0.01 % → 100 % of base LR ──
+        warmup_scheduler = LinearLR(
+            optimizer,
+            start_factor=1e-4,
+            end_factor=1.0,
+            total_iters=self.warmup_epochs,
+        )
+
+        if main_scheduler_cfg is not None:
+            # main_scheduler_cfg is a dict: {"scheduler": ..., "interval": ..., ...}
+            main_scheduler = main_scheduler_cfg["scheduler"]
+            interval = main_scheduler_cfg.get("interval", self.lr_scheduler_interval)
+            monitor = main_scheduler_cfg.get("monitor", self.lr_scheduler_monitor)
+
+            # Chain: warmup for warmup_epochs, then hand off to main scheduler
+            combined = SequentialLR(
+                optimizer,
+                schedulers=[warmup_scheduler, main_scheduler],
+                milestones=[self.warmup_epochs],
+            )
+            return [optimizer], {
+                "scheduler": combined,
+                "interval": interval,
+                "monitor": monitor,
+            }
+        else:
+            return [optimizer], {
+                "scheduler": warmup_scheduler,
+                "interval": "epoch",
+                "monitor": self.lr_scheduler_monitor,
+            }
 
     def shared_step(
         self, batch: Any, batch_idx: int, phase: str, dataloader_idx: int = None
@@ -214,6 +281,13 @@ class HybridRLModule(PARCORLModule):
 
         # ── Env reset ────────────────────────────────────────────
         td = self.env.reset(batch)
+
+        # ── NaN guard: check batch inputs after reset ─────────────
+        for key in ("locs", "distance_matrix", "demand", "capacity", "speed"):
+            val = td.get(key, None)
+            if val is not None and torch.isnan(val).any():
+                log.warning(f"NaN detected in td['{key}'] after env.reset — clamping")
+                td[key] = torch.nan_to_num(val, nan=0.0, posinf=1e4, neginf=-1e4)
 
         # Augmentation is a training-only trick (SymNCO).
         # At val/test we decode greedily on the original instance to
