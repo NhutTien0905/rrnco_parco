@@ -488,6 +488,31 @@ class HybridRLModule(PARCORLModule):
             ratio = max_time / (mean_time + 1e-8)
             _log("agents/time_ratio", ratio)
 
+            # ── Workload balance metrics (Solution 1 monitoring) ──
+            # Coefficient of variation: std / mean (scale-invariant balance measure)
+            cv = std_time / (mean_time + 1e-8)  # [B]
+            _log("balance/time_cv", cv)
+
+            # Max/min ratio: how many times busier is the busiest vs least busy agent
+            max_min_ratio = max_time / (min_time + 1e-8)  # [B]
+            _log("balance/time_max_min_ratio", max_min_ratio)
+
+            # Balance penalty value (what actually gets added to reward)
+            if hasattr(self.env, "balance_weight") and self.env.balance_weight > 0:
+                balance_penalty = self.env.balance_weight * std_time  # [B]
+                _log("balance/penalty", balance_penalty)
+                _log("balance/weight", self.env.balance_weight)
+
+        # ── 2b. Per-agent visit count stats ──────────────────────
+        if "num_visits_per_agent" in td.keys():
+            visits = td["num_visits_per_agent"]  # [B, m]
+            _log("balance/visits_mean", visits.mean(dim=1))
+            _log("balance/visits_std", visits.std(dim=1))
+            _log("balance/visits_max", visits.max(dim=1)[0])
+            _log("balance/visits_min", visits.min(dim=1)[0])
+            visits_cv = visits.std(dim=1) / (visits.mean(dim=1) + 1e-8)
+            _log("balance/visits_cv", visits_cv)
+
         # ── 3. Decode steps ──────────────────────────────────────
         if "steps" in out:
             _log("decode/steps", float(out["steps"]))

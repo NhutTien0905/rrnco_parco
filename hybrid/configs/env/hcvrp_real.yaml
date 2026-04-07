@@ -1,6 +1,7 @@
 _target_: hybrid.envs.hcvrp_real.HCVRPRealEnv
 name: hcvrp_real
 normalize_distance: true
+balance_weight: 0.1  # Workload balance penalty weight (0.0 = disabled)
 
 generator_params:
   num_loc: 100

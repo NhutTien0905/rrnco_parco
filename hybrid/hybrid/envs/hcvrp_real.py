@@ -256,6 +256,7 @@ class HCVRPRealEnv(HCVRPEnv):
         generator_params: dict = {},
         normalize_distance: bool = True,
         check_solution: bool = False,
+        balance_weight: float = 0.0,
         **kwargs,
     ):
         # Build our generator before calling super().__init__
@@ -266,6 +267,7 @@ class HCVRPRealEnv(HCVRPEnv):
             else:
                 generator = HCVRPRealGenerator(**generator_params)
         self.normalize_distance = normalize_distance
+        self.balance_weight = balance_weight
         # Pass our generator to HCVRPEnv.__init__
         super().__init__(
             generator=generator,
@@ -343,6 +345,18 @@ class HCVRPRealEnv(HCVRPEnv):
         # --- Call parent _reset to build standard HCVRP TensorDict ---
         td_reset = super()._reset(td, batch_size)
 
+        # --- Track per-agent visit counts for workload balancing ---
+        reset_batch_size = td_reset.batch_size
+        reset_num_agents = td_reset["agents_speed"].shape[-1]
+        td_reset.set(
+            "num_visits_per_agent",
+            torch.zeros(
+                (*reset_batch_size, reset_num_agents),
+                dtype=torch.float32,
+                device=device,
+            ),
+        )
+
         # --- Inject distance matrix and normalization metadata ---
         td_reset.set("distance_matrix", distance_matrix)
 
@@ -360,21 +374,68 @@ class HCVRPRealEnv(HCVRPEnv):
         """Step the environment, preserving distance matrix in TensorDict.
 
         The parent _step() handles all multi-agent logic (current_length via
-        Euclidean distance, capacity, visited, action_mask). We just ensure
-        the distance_matrix and normalization metadata persist.
+        Euclidean distance, capacity, visited, action_mask). We also track
+        per-agent visit counts for workload balancing.
         """
+        num_agents = td["current_node"].size(-1)
+
+        # Determine which agents are visiting a customer (not depot)
+        is_customer = td["action"] >= num_agents  # [B, m]
+
+        # Determine which agents are staying at the same node (no new visit)
+        is_staying = td["action"] == td["current_node"]  # [B, m]
+
         # Parent handles everything — distance_matrix is already in td
         # and TensorDict preserves keys through updates
-        return super()._step(td)
+        td = super()._step(td)
+
+        # Update per-agent visit counts (only for new customer visits)
+        if "num_visits_per_agent" in td.keys():
+            new_visit = (is_customer & ~is_staying).float()  # [B, m]
+            td["num_visits_per_agent"] = td["num_visits_per_agent"] + new_visit
+
+        return td
 
     def _get_reward(self, td: TensorDict, actions: TensorDict) -> TensorDict:
-        """Compute reward using PARCO's min-max time objective.
+        """Compute reward: PARCO's min-max time + workload balance penalty.
 
-        We keep PARCO's original reward computation which uses Euclidean
-        distances via `current_length` accumulated in _step(). The distance
-        matrix is used by the encoder/decoder, not for reward computation.
+        Extends the original reward with a workload balance term that
+        penalizes uneven agent completion times:
+
+            reward = -(makespan + balance_weight * time_std)
+
+        where:
+        - makespan = max_i(tour_length_i / speed_i)  (PARCO original)
+        - time_std = std(tour_length_i / speed_i)     (balance penalty)
+        - balance_weight: hyperparameter (0.0 = disabled, default)
+
+        The balance penalty encourages the model to distribute work more
+        evenly across agents, reducing the gap between the busiest and
+        least busy agents.
 
         Returns:
-            Negative max time across agents: -max_i(tour_length_i / speed_i)
+            Negative (makespan + balance_weight * time_std) per batch.
         """
-        return super()._get_reward(td, actions)
+        from rl4co.utils.ops import gather_by_index, get_distance
+
+        current_length = td["current_length"]
+
+        # Adding the final distance to the depot
+        current_loc = gather_by_index(td["locs"], td["current_node"])
+        depot_loc = gather_by_index(td["locs"], td["depot_node"])
+        current_length = current_length + get_distance(depot_loc, current_loc)
+
+        # Calculate per-agent completion time
+        current_time = current_length / td["agents_speed"]  # [B, m]
+
+        # Original makespan objective
+        max_time = current_time.max(dim=1)[0]  # [B]
+
+        if self.balance_weight > 0:
+            # Workload balance penalty: std of agent completion times
+            time_std = current_time.std(dim=1)  # [B]
+            reward = -(max_time + self.balance_weight * time_std)
+        else:
+            reward = -max_time
+
+        return reward
