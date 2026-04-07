@@ -53,16 +53,15 @@ rrnco_parco/
 ### Installation
 
 ```bash
-# Create and activate a virtual environment (or use PARCO's existing one)
-cd parco
+# Create and activate a virtual environment
 python -m venv .venv
 source .venv/bin/activate
 
 # Install all three packages in editable mode
-pip install -e ../parco -e ../real-routing-nco -e ../hybrid
+pip install -e ./parco -e ./real-routing-nco -e ./hybrid
 
 # (Optional) Install dev dependencies
-pip install -e "../hybrid[dev]"
+pip install -e "./hybrid[dev]"
 ```
 
 ### Verify Installation

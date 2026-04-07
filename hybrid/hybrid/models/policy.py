@@ -9,6 +9,7 @@ The only override to ``PARCOPolicy.forward()`` is the encoder call:
 so that the RRNCO DistanceExpert can switch between train/test sampling.
 """
 
+import torch
 import torch.nn as nn
 
 from typing import Optional
@@ -187,6 +188,23 @@ class HybridPolicy(PARCOPolicy):
         # ═══════════════════════════════════════════════════════════════
         hidden, init_embeds = self.encoder(td, phase=phase)
 
+        # ── NaN guard: sanitize encoder outputs before decoding ──────
+        if isinstance(hidden, (list, tuple)):
+            hidden = tuple(
+                torch.nan_to_num(h, nan=0.0, posinf=1e4, neginf=-1e4)
+                if isinstance(h, torch.Tensor) else h
+                for h in hidden
+            )
+        elif isinstance(hidden, torch.Tensor):
+            if torch.isnan(hidden).any() or torch.isinf(hidden).any():
+                log.warning("NaN/Inf detected in encoder hidden — clamping")
+                hidden = torch.nan_to_num(hidden, nan=0.0, posinf=1e4, neginf=-1e4)
+        if isinstance(init_embeds, torch.Tensor) and (
+            torch.isnan(init_embeds).any() or torch.isinf(init_embeds).any()
+        ):
+            log.warning("NaN/Inf detected in init_embeds — clamping")
+            init_embeds = torch.nan_to_num(init_embeds, nan=0.0, posinf=1e4, neginf=-1e4)
+
         # ═══════════════════════════════════════════════════════════════
         # 2. DECODE SETUP  (same as PARCOPolicy.forward)
         # ═══════════════════════════════════════════════════════════════
@@ -275,6 +293,7 @@ class HybridPolicy(PARCOPolicy):
                 return_sum_log_likelihood,
             ),
             "halting_ratio": halting_ratio,
+            "final_td": td,  # terminal state for diagnostic metrics
         }
 
         if return_actions:

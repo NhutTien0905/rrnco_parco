@@ -9,6 +9,10 @@ import lightning as L
 import pyrootutils
 import torch
 
+# Uncomment to pinpoint the exact operation that produces NaN/Inf gradients.
+# NOTE: this has significant runtime overhead – disable once root cause is found.
+# torch.autograd.set_detect_anomaly(True)
+
 from lightning import Callback, LightningModule
 from lightning.pytorch.loggers import Logger
 from omegaconf import DictConfig, ListConfig
@@ -42,6 +46,12 @@ def run(cfg: DictConfig) -> Tuple[dict, dict]:
     # set seed for random number generators in pytorch, numpy and python.random
     if cfg.get("seed"):
         L.seed_everything(cfg.seed, workers=True)
+
+    # Enable anomaly detection when running in debug mode to pinpoint NaN sources.
+    # NOTE: significant runtime overhead — only use for debugging.
+    if cfg.get("debug"):
+        log.warning("Anomaly detection ENABLED (debug mode) — expect slower training")
+        torch.autograd.set_detect_anomaly(True)
 
     # Instantiate the environment
     log.info(f"Instantiating environment <{cfg.env._target_}>")

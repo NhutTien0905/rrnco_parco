@@ -44,13 +44,15 @@ model:
   val_data_size: 10_000
   test_data_size: 1_280    # match the file size (1280 instances)
   optimizer_kwargs:
-    lr: 2e-4
+    lr: 1e-4       # Reduced from 2e-4 to prevent NaN from large early gradients
     weight_decay: 1e-6
   lr_scheduler:
     "MultiStepLR"
   lr_scheduler_kwargs:
     milestones: [30, 60]   # 🔥 earlier decay to escape plateau
     gamma: 0.5             # 🔥 softer decay (was 0.1)
+  lr_scheduler_interval: "epoch"
+  warmup_epochs: 1   # Linear LR warmup over first epoch (handled in HybridRLModule)
   num_augment: 4           # 🔥 train-only augmentation (val is unaugmented)
   num_starts: 8            # 🔥 multiple start nodes to activate SymNCO losses (was 1)
   alpha: 0.1               # 🔥 reduced SymNCO invariance weight (was 0.2)

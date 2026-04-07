@@ -15,6 +15,7 @@ Training loop (inherited from PARCORLModule):
 import torch
 import torch.nn as nn
 
+from torch.optim.lr_scheduler import LinearLR, SequentialLR
 from typing import Any, Optional
 
 from rl4co.envs.common.base import RL4COEnvBase
@@ -127,6 +128,9 @@ class HybridRLModule(PARCORLModule):
             in the shaped reward.  Set to 0.0 to disable (default 0.05).
         entropy_coeff: Weight for the entropy bonus term in the loss.
             Set to 0.0 to disable (default 0.01).
+        warmup_epochs: Number of epochs to linearly warm up the LR from
+            0 → base_lr.  Helps prevent NaN logits from large gradients at
+            initialisation.  Set to 0 to disable (default 1).
         **kwargs: Forwarded to :class:`PARCORLModule` → SymNCO →
             REINFORCE → RL4COLitModule.  Useful keys include
             ``optimizer_kwargs``, ``lr_scheduler``, ``batch_size``, etc.
@@ -149,11 +153,14 @@ class HybridRLModule(PARCORLModule):
         reward_shaping_coeff: float = 0.05,
         # ── Entropy bonus ────────────────────────────────────────
         entropy_coeff: float = 0.01,
+        # ── LR warmup ────────────────────────────────────────────
+        warmup_epochs: int = 1,
         # ── Rest ─────────────────────────────────────────────────
         **kwargs,
     ):
         self.reward_shaping_coeff = reward_shaping_coeff
         self.entropy_coeff = entropy_coeff
+        self.warmup_epochs = warmup_epochs
         # Build default policy if none provided
         if policy is None:
             log.info("Building default HybridPolicy for HybridRLModule")
@@ -171,6 +178,66 @@ class HybridRLModule(PARCORLModule):
             train_max_size=train_max_size,
             **kwargs,
         )
+
+    def configure_optimizers(self):
+        """Override to prepend a linear LR warmup before the parent scheduler.
+
+        The parent (RL4COLitModule) returns one of:
+          - A bare ``optimizer``              (no LR scheduler configured)
+          - ``([optimizer], scheduler_cfg)``  (tuple when scheduler is set)
+
+        If ``warmup_epochs <= 0`` the parent behaviour is unchanged.
+        """
+        result = super().configure_optimizers()
+
+        if self.warmup_epochs <= 0:
+            return result
+
+        # ── Unpack parent result ──────────────────────────────────────
+        # Case 1: ([optimizer], {scheduler_cfg})  ← tuple returned by parent
+        if isinstance(result, tuple) and len(result) == 2:
+            optimizer_list, main_scheduler_cfg = result
+            optimizer = optimizer_list[0] if isinstance(optimizer_list, list) else optimizer_list
+        # Case 2: bare optimizer (no scheduler configured)
+        elif isinstance(result, torch.optim.Optimizer):
+            optimizer = result
+            main_scheduler_cfg = None
+        else:
+            # Fallback: unknown shape, return as-is
+            log.warning("configure_optimizers: unrecognised parent result shape, skipping warmup")
+            return result
+
+        # ── Build linear warmup: LR ramps 0.01 % → 100 % of base LR ──
+        warmup_scheduler = LinearLR(
+            optimizer,
+            start_factor=1e-4,
+            end_factor=1.0,
+            total_iters=self.warmup_epochs,
+        )
+
+        if main_scheduler_cfg is not None:
+            # main_scheduler_cfg is a dict: {"scheduler": ..., "interval": ..., ...}
+            main_scheduler = main_scheduler_cfg["scheduler"]
+            interval = main_scheduler_cfg.get("interval", self.lr_scheduler_interval)
+            monitor = main_scheduler_cfg.get("monitor", self.lr_scheduler_monitor)
+
+            # Chain: warmup for warmup_epochs, then hand off to main scheduler
+            combined = SequentialLR(
+                optimizer,
+                schedulers=[warmup_scheduler, main_scheduler],
+                milestones=[self.warmup_epochs],
+            )
+            return [optimizer], {
+                "scheduler": combined,
+                "interval": interval,
+                "monitor": monitor,
+            }
+        else:
+            return [optimizer], {
+                "scheduler": warmup_scheduler,
+                "interval": "epoch",
+                "monitor": self.lr_scheduler_monitor,
+            }
 
     def shared_step(
         self, batch: Any, batch_idx: int, phase: str, dataloader_idx: int = None
@@ -214,6 +281,13 @@ class HybridRLModule(PARCORLModule):
 
         # ── Env reset ────────────────────────────────────────────
         td = self.env.reset(batch)
+
+        # ── NaN guard: check batch inputs after reset ─────────────
+        for key in ("locs", "distance_matrix", "demand", "capacity", "speed"):
+            val = td.get(key, None)
+            if val is not None and torch.isnan(val).any():
+                log.warning(f"NaN detected in td['{key}'] after env.reset — clamping")
+                td[key] = torch.nan_to_num(val, nan=0.0, posinf=1e4, neginf=-1e4)
 
         # Augmentation is a training-only trick (SymNCO).
         # At val/test we decode greedily on the original instance to
@@ -333,4 +407,139 @@ class HybridRLModule(PARCORLModule):
                     sync_dist=True,
                 )
 
+        # ── 📊 Enhanced diagnostic metrics ────────────────────────
+        # Use terminal state (after full decode) instead of reset state,
+        # so that current_length, visited, etc. reflect the completed episode.
+        final_td = out.get("final_td", td)
+        self._log_diagnostic_metrics(final_td, out, phase, dataloader_idx)
+
         return {"loss": out.get("loss", None), **metrics}
+
+    # ══════════════════════════════════════════════════════════════
+    # Diagnostic Metrics
+    # ══════════════════════════════════════════════════════════════
+
+    def _log_diagnostic_metrics(
+        self, td, out, phase: str, dataloader_idx=None
+    ):
+        """Log comprehensive diagnostic metrics for monitoring training health.
+
+        Metrics logged:
+            1. **distance_bias/alpha**: Learnable weight controlling how much
+               the decoder relies on the distance matrix.  If it trends → 0
+               the model is ignoring distance information.
+            2. **agents/max_time**: The worst-agent makespan (= -reward).
+            3. **agents/mean_time**: Mean agent completion time.
+            4. **agents/time_std**: Std dev of agent times — lower means
+               better workload balance.
+            5. **agents/time_ratio**: max_time / mean_time — closer to 1.0
+               means agents are well balanced.
+            6. **decode/steps**: Number of autoregressive decode steps.
+            7. **decode/visited_ratio**: Fraction of customers actually
+               served (1.0 = feasible solution).
+        """
+        suffix = ""
+        if dataloader_idx is not None and self.dataloader_names is not None:
+            suffix = "/" + self.dataloader_names[dataloader_idx]
+        on_step = self.log_on_step if phase == "train" else False
+        on_epoch = False if phase == "train" else True
+
+        def _log(name, value, prog=False):
+            if isinstance(value, torch.Tensor):
+                value = value.mean()
+            self.log(
+                f"{phase}/{name}{suffix}",
+                value,
+                on_step=on_step,
+                on_epoch=on_epoch,
+                prog_bar=prog,
+                sync_dist=True,
+            )
+
+        # ── 1. Distance bias alpha (learnable parameter) ─────────
+        decoder = self.policy.decoder
+        if hasattr(decoder, "alpha") and hasattr(decoder, "use_distance_bias"):
+            _log("distance_bias/alpha", decoder.alpha.data.mean())
+
+        # ── 2. Per-agent tour stats ──────────────────────────────
+        # Compute agent times from the environment's final state
+        if "current_length" in td.keys() and "agents_speed" in td.keys():
+            from rl4co.utils.ops import gather_by_index, get_distance
+
+            current_length = td["current_length"]  # [B, m]
+            # Add final leg back to depot
+            if "current_node" in td.keys() and "locs" in td.keys() and "depot_node" in td.keys():
+                current_loc = gather_by_index(td["locs"], td["current_node"])
+                depot_loc = gather_by_index(td["locs"], td["depot_node"])
+                current_length = current_length + get_distance(depot_loc, current_loc)
+
+            agent_times = current_length / td["agents_speed"]  # [B, m]
+
+            max_time = agent_times.max(dim=1)[0]      # [B]
+            min_time = agent_times.min(dim=1)[0]       # [B]
+            mean_time = agent_times.mean(dim=1)        # [B]
+            std_time = agent_times.std(dim=1)           # [B]
+
+            _log("agents/max_time", max_time)
+            _log("agents/min_time", min_time)
+            _log("agents/mean_time", mean_time)
+            _log("agents/time_std", std_time)
+            # Ratio > 1.0 means imbalance; = 1.0 means perfect balance
+            ratio = max_time / (mean_time + 1e-8)
+            _log("agents/time_ratio", ratio)
+
+        # ── 3. Decode steps ──────────────────────────────────────
+        if "steps" in out:
+            _log("decode/steps", float(out["steps"]))
+
+        # ── 4. Visited ratio (feasibility) ───────────────────────
+        if "visited" in td.keys():
+            # visited: [B, m+N] or [B, N] boolean mask
+            visited = td["visited"]
+            if visited.dim() >= 2:
+                num_agents = td["agents_speed"].shape[-1] if "agents_speed" in td.keys() else 0
+                # Only count customer nodes (skip depot/agent indices)
+                customer_visited = visited[..., num_agents:] if visited.shape[-1] > num_agents else visited
+                visited_ratio = customer_visited.float().mean()
+                _log("decode/visited_ratio", visited_ratio, prog=(phase != "train"))
+
+    def on_before_optimizer_step(self, optimizer):
+        """Log gradient norms before optimizer step.
+
+        This is the most important diagnostic for detecting:
+        - Vanishing gradients (norm → 0): model stopped learning
+        - Exploding gradients (norm → ∞): training about to diverge
+        - Healthy training: norm is stable or slowly decreasing
+        """
+        # Total gradient norm across all parameters
+        total_norm = 0.0
+        for p in self.parameters():
+            if p.grad is not None:
+                total_norm += p.grad.data.norm(2).item() ** 2
+        total_norm = total_norm ** 0.5
+
+        self.log(
+            "train/grad_norm",
+            total_norm,
+            on_step=self.log_on_step,
+            on_epoch=False,
+            prog_bar=False,
+            sync_dist=True,
+        )
+
+        # Gradient norm per component (encoder vs decoder)
+        for comp_name, comp in [("encoder", self.policy.encoder),
+                                 ("decoder", self.policy.decoder)]:
+            comp_norm = 0.0
+            for p in comp.parameters():
+                if p.grad is not None:
+                    comp_norm += p.grad.data.norm(2).item() ** 2
+            comp_norm = comp_norm ** 0.5
+            self.log(
+                f"train/grad_norm/{comp_name}",
+                comp_norm,
+                on_step=self.log_on_step,
+                on_epoch=False,
+                prog_bar=False,
+                sync_dist=True,
+            )
