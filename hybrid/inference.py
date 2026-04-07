@@ -17,6 +17,10 @@ Usage examples:
     # Use a specific epoch checkpoint
     python inference.py \
         --checkpoint logs/train/runs/2026-03-31_23-36-31/checkpoints/epoch_003.ckpt
+        
+2026-03-31_23-36-31: tested - co them loss_ps va monitor cac chi so lien quan
+2026-03-31_08-41-43: co them loss_ps
+2026-03-28_14-14-56: chua co loss_ps
 """
 
 import argparse
