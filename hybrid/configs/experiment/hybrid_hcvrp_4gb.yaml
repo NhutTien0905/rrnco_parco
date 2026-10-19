@@ -10,6 +10,9 @@ defaults:
   - override /logger: wandb.yaml
 
 # Environment
+env:
+  balance_weight: 0.1
+
 generator_params:
   num_loc: 100
   num_agents: 7
