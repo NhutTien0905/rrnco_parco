@@ -71,6 +71,8 @@ class HybridInitEmbedding(nn.Module):
         self.svd_cache_dir = svd_cache_dir
         self.svd_k = svd_k
         self._svd_cache: dict = {}
+        self._svd_found_path: str | None = None
+        self._svd_search_done: bool = False
 
         # ── Depot/Agent embedding (PARCO-style) ──────────────────────────
         # depot_locs [B, m, 2] → Linear → [B, m, H]
@@ -216,23 +218,37 @@ class HybridInitEmbedding(nn.Module):
                         city_name = str(c)
                 except Exception:
                     city_name = None
-            candidate_paths = []
-            if city_name is not None:
-                candidate_paths.append(
-                    os.path.join(self.svd_cache_dir, city_name, f"svd_k{self.svd_k}.npz")
-                )
-            # generic fallbacks
-            candidate_paths.append(os.path.join(self.svd_cache_dir, f"svd_k{self.svd_k}.npz"))
-            # glob any city subdir
-            glob_candidates = glob.glob(
-                os.path.join(self.svd_cache_dir, "*", f"svd_k{self.svd_k}.npz")
-            )
-            candidate_paths.extend(glob_candidates)
-            found = None
-            for p in candidate_paths:
-                if os.path.isfile(p):
-                    found = p
-                    break
+            # memoize candidate discovery after first hit to avoid per-forward glob
+            if self._svd_search_done and self._svd_found_path is not None:
+                found = self._svd_found_path if os.path.isfile(self._svd_found_path) else None
+            else:
+                candidate_paths = []
+                if city_name is not None:
+                    candidate_paths.append(
+                        os.path.join(self.svd_cache_dir, city_name, f"svd_k{self.svd_k}.npz")
+                    )
+                candidate_paths.append(os.path.join(self.svd_cache_dir, f"svd_k{self.svd_k}.npz"))
+                if not self._svd_search_done:
+                    glob_candidates = glob.glob(
+                        os.path.join(self.svd_cache_dir, "*", f"svd_k{self.svd_k}.npz")
+                    )
+                    candidate_paths.extend(glob_candidates)
+                else:
+                    # reuse previously discovered glob result (no new glob)
+                    if self._svd_found_path is not None:
+                        candidate_paths.append(self._svd_found_path)
+                found = None
+                for p in candidate_paths:
+                    if os.path.isfile(p):
+                        found = p
+                        break
+                if found is not None:
+                    self._svd_found_path = found
+                    self._svd_search_done = True
+                elif not self._svd_search_done:
+                    # remember negative if glob was attempted and nothing found; still mark searched
+                    # so next forward without city_name skips glob re-scan
+                    self._svd_search_done = True
             if found is not None:
                 # memoize loaded array per path to avoid per-step IO
                 if found not in self._svd_cache:

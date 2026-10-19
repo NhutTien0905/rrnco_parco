@@ -125,7 +125,7 @@ def main():
 
         for b in range(batch_size):
             agent_actions = actions[b, :, 0]  # Agent indices
-            counts = [(agent_actions >= a).sum().item() for a in range(num_agents)]  # Fixed: == instead of >=
+            counts = [(agent_actions == a).sum().item() for a in range(num_agents)]
             all_counts.append(counts)
             
             # Get makespan from current_length or compute from used_capacity

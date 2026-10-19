@@ -171,6 +171,12 @@ class HybridRLModule(PARCORLModule):
         self.entropy_coeff = entropy_coeff
         self.warmup_epochs = warmup_epochs
         self.micro_batch_aug = micro_batch_aug
+        if micro_batch_aug == 2 and num_augment > 4:
+            log.warning(
+                "micro_batch_aug=2 with n_aug=%d: forward-chunked only, backward still B*n_aug; "
+                "consider micro_batch_aug=1 or per-chunk manual_backward if backward OOM",
+                num_augment,
+            )
         # Build default policy if none provided
         if policy is None:
             log.info("Building default HybridPolicy for HybridRLModule")
