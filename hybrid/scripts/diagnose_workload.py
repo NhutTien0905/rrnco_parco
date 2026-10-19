@@ -202,6 +202,18 @@ def main():
 
         print(f"\nAverage makespan: {sum(all_makespans)/len(all_makespans):.4f}")
 
+    # ── Profiling: peak CUDA memory (if available) ──
+    if torch.cuda.is_available():
+        try:
+            peak = torch.cuda.max_memory_allocated()
+            print(f"\n[profiling] torch.cuda.max_memory_allocated(): {peak / 1024**2:.1f} MiB ({peak} bytes)")
+            print("  Tip: compare batch2/aug2 vs batch8/aug8 by re-running with different batch_size/num_augment.")
+            print("  Reset peak with torch.cuda.reset_peak_memory_stats() before each run for clean comparison.")
+        except Exception as e:
+            print(f"[profiling] cuda memory query failed: {e}")
+    else:
+        print("\n[profiling] CUDA not available -- no GPU memory stats.")
+
     print("\nDone!")
 
 
