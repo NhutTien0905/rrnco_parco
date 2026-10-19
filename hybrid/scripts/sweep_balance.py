@@ -35,10 +35,17 @@ def _via_hydra(w,exp,ep):
         except Exception: pass
 def run(ws,exp,ep,out):
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True); rows=[]
-    # prefer in-process Hydra if available, else subprocess fallback
+    # prefer in-process Hydra if available, else subprocess fallback (separate hydra/torch)
     use_hydra=False
-    try: import hydra, torch; use_hydra=True
-    except Exception: use_hydra=False
+    _hydra_err=None; _torch_err=None
+    try: import hydra
+    except Exception as e: _hydra_err=e
+    else:
+        try: import torch
+        except Exception as e:
+            _torch_err=e; print(f"  hydra available but torch missing: {e} -> subprocess fallback (no in-process metric capture)")
+        else: use_hydra=True
+    if _hydra_err is not None: print(f"  hydra not available: {_hydra_err} -> subprocess fallback")
     for w in ws:
         status="success"; vals={k:"" for k in KEYS}
         if use_hydra:
@@ -46,11 +53,16 @@ def run(ws,exp,ep,out):
             if got is not None: vals=got
             else: print(f"  hydra failed weight={w}: {status} -> subprocess fallback")
             if got is None: use_hydra=False  # fallback for remaining
-        if not use_hydra or vals=={k:"" for k in KEYS} and status.startswith("fail"):
+        vals_empty=(vals=={k:"" for k in KEYS})
+        if vals_empty and status=="success":
+            status="success_no_metrics"; print(f"  WARNING: weight={w} no balance metrics captured -> {status}")
+        if vals_empty and (not use_hydra or status!="success"):
             c=cmd(w,exp,ep); print(f"\n=== balance_weight={w} ===\n{' '.join(c)}")
             r=subprocess.run(c)
             if r.returncode!=0: status=f"fail:{r.returncode}"; print(f"  WARNING: failed weight={w} exit {r.returncode}")
-            else: status="success"  # subprocess ok but metrics unknown -> empty strings kept
+            else:
+                if vals=={k:"" for k in KEYS}: status="success_no_metrics"; print(f"  WARNING: weight={w} subprocess success but no metrics -> {status}")
+                else: status="success"
         row={"balance_weight":w, **vals, "status":status}
         rows.append(row)
     with open(out,"w",newline="") as f:
