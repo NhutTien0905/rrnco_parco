@@ -17,12 +17,12 @@ def _dry_run(args):
 
 
 def _build_calib_loader(n=256, batch_size=32, num_loc=100, num_agents=7):
-    """Yield TensorDict batches for ModelOpt calibration (256 samples)."""
+    """Yield TensorDict batches for ModelOpt calibration (256 samples). Returns (batches, env)."""
     try:
         from hybrid.envs import HCVRPRealEnv, HCVRPRealGenerator
     except Exception as e:
         print(f"calib loader fallback (env import failed: {e}) -> dummy tensors")
-        return []
+        return [], None
     try:
         gen = HCVRPRealGenerator(num_loc=num_loc, num_agents=num_agents)
         env = HCVRPRealEnv(generator=gen)
@@ -34,10 +34,10 @@ def _build_calib_loader(n=256, batch_size=32, num_loc=100, num_agents=7):
             td = env.reset(td)
             batches.append(td)
             remaining -= b
-        return batches
+        return batches, env
     except Exception as e:
         print(f"calib loader failed: {e}")
-        return []
+        return [], None
 
 
 def _export(args):
@@ -71,14 +71,18 @@ def _export(args):
     try:
         import modelopt.torch.quantization as mtq
         from modelopt.torch.quantization.config import INT8_SMOOTHQUANT_CFG
-        calib = _build_calib_loader(n=args.calib_samples)
+        calib, calib_env = _build_calib_loader(n=args.calib_samples)
+        _calib_env = calib_env if calib_env is not None else getattr(model, "env", None)
         def calib_loop(m):
             for td in calib:
                 with torch.no_grad():
-                    m(td, phase="val")
+                    m(td, _calib_env, phase="val")
         if len(calib) > 0:
-            print(f"Quantizing with ModelOpt SmoothQuant ({len(calib)} batches, {args.calib_samples} samples)")
-            policy = mtq.quantize(policy, INT8_SMOOTHQUANT_CFG, forward_loop=calib_loop)
+            if _calib_env is None:
+                print("Skipping SmoothQuant (calib env unavailable) -> FP32")
+            else:
+                print(f"Quantizing with ModelOpt SmoothQuant ({len(calib)} batches, {args.calib_samples} samples)")
+                policy = mtq.quantize(policy, INT8_SMOOTHQUANT_CFG, forward_loop=calib_loop)
         else:
             print("Skipping SmoothQuant (no calib data) -> FP32")
     except Exception as e:
@@ -103,8 +107,9 @@ def _export(args):
         def forward(self, locs, distance_matrix):
             from tensordict import TensorDict
             td = TensorDict({"locs": locs, "distance_matrix": distance_matrix}, batch_size=[locs.shape[0]])
-            # minimal env stub if needed; policy needs env for decode loop
-            return self.pol(td, self.env or td, phase="val")["reward"]
+            if self.env is None:
+                raise RuntimeError("env is None — cannot export without HCVRPRealEnv")
+            return self.pol(td, self.env, phase="val")["reward"]
 
     wrapper = _Wrapper(policy, env)
     dummy_locs = td["locs"] if "locs" in td.keys() else torch.rand(1, 25, 2)
@@ -115,14 +120,14 @@ def _export(args):
                           dynamic_axes={"locs": {0: "B"}, "distance_matrix": {0: "B"}, "reward": {0: "B"}})
         print(f"Wrote {out} (INT8 SmoothQuant if modelopt available, else FP32)")
     except Exception as e:
-        print(f"ONNX export failed ({e}) -> writing placeholder (install onnxscript/onnx for real export)")
-        # placeholder so bench_serving has a file to load
+        print(f"ONNX export failed ({e}) -> no valid ONNX written (install onnxscript/onnx for real export)", file=sys.stderr)
+        # Do not write placeholder — invalid ONNX hides broken artifact; bench_serving will mock when file missing
         try:
-            with open(out, "wb") as f:
-                f.write(b"ONNX_PLACEHOLDER")
-            print(f"Wrote placeholder {out}")
+            if os.path.exists(out) and os.path.getsize(out) < 1024:
+                os.remove(out)
         except Exception:
             pass
+        sys.exit(1)
 
 
 def main():

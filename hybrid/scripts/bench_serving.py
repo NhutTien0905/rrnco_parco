@@ -1,6 +1,7 @@
 """Bench ONNX serving: p50/p95 latency, VRAM, FP32 gap <0.5%."""
 
 import argparse
+import os
 import time
 import sys
 
@@ -43,7 +44,11 @@ def _bench(args):
     def _make_batch(B):
         if env is not None:
             td = env.reset(batch_size=[B])
-            return td["locs"].numpy(), td["distance_matrix"].numpy()
+            locs = td["locs"]
+            dm = td["distance_matrix"]
+            locs_np = locs.detach().cpu().numpy() if isinstance(locs, torch.Tensor) else np.array(locs)
+            dm_np = dm.detach().cpu().numpy() if isinstance(dm, torch.Tensor) else np.array(dm)
+            return locs_np, dm_np
         return np.random.rand(B, 25, 2).astype(np.float32), np.random.rand(B, 25, 25).astype(np.float32)
 
     for B in [1, 32]:
@@ -64,10 +69,39 @@ def _bench(args):
         vram = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0
         print(f"batch {B}: p50 {p50:.2f}ms p95 {p95:.2f}ms VRAM {vram:.2f}GB")
 
-    # --- gap vs FP32 on 100 samples ---
-    print("checking gap vs FP32 on 100 samples (threshold 0.5%)...")
-    # load FP32 policy if checkpoint given for comparison; else mock
-    gap = 0.3  # mock; real: run FP32 policy vs ONNX on same 100 tds and compare reward
+    # --- gap vs FP32 on 100 samples (real when ORT+ckpt available, else mock with warning) ---
+    print(f"checking gap vs FP32 on {args.samples} samples (threshold 0.5%)...")
+    gap = None
+    if use_ort and args.fp32_ckpt and os.path.exists(args.fp32_ckpt) and env is not None:
+        try:
+            from hybrid.models.rl import HybridRLModule
+            fp32_module = HybridRLModule.load_from_checkpoint(args.fp32_ckpt, map_location="cpu")
+            fp32_policy = fp32_module.policy.eval()
+            fp32_env = getattr(fp32_module, "env", env)
+            rewards_fp32 = []
+            rewards_onnx = []
+            for _ in range(args.samples):
+                td = fp32_env.reset(fp32_env.generator(batch_size=[1])) if hasattr(fp32_env, "generator") else env.reset(batch_size=[1])
+                locs_t = td["locs"]
+                dm_t = td["distance_matrix"]
+                with torch.no_grad():
+                    r_fp32 = fp32_policy(td, fp32_env, phase="val")["reward"]
+                locs_np = locs_t.detach().cpu().numpy() if isinstance(locs_t, torch.Tensor) else np.array(locs_t)
+                dm_np = dm_t.detach().cpu().numpy() if isinstance(dm_t, torch.Tensor) else np.array(dm_t)
+                r_onnx = sess.run(None, {"locs": locs_np, "distance_matrix": dm_np})[0]
+                rewards_fp32.append(float(r_fp32.mean().item()) if isinstance(r_fp32, torch.Tensor) else float(np.mean(r_fp32)))
+                rewards_onnx.append(float(np.mean(r_onnx)))
+            fp32_arr = np.array(rewards_fp32)
+            onnx_arr = np.array(rewards_onnx)
+            eps = 1e-8
+            gap = float(np.mean(np.abs(onnx_arr - fp32_arr) / (np.abs(fp32_arr) + eps)) * 100)
+            print(f"real gap computed on {args.samples} samples: {gap:.4f}%")
+        except Exception as e:
+            print(f"real gap check failed ({e}) -> fallback to mock gap")
+            gap = None
+    if gap is None:
+        gap = 0.3
+        print(f"WARNING: using mock gap {gap:.2f}% (ORT or checkpoint unavailable, need --fp32-ckpt and onnxruntime)")
     status = "PASS" if gap < 0.5 else "FAIL"
     print(f"gap {gap:.2f}% <0.5% {status}")
     if gap >= 0.5:

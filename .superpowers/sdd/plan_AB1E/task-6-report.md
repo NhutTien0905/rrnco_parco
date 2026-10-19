@@ -27,3 +27,18 @@
 - ONNX wrapper is reward-only: exports `policy(td, env, phase="val")["reward"]` via locs+distance_matrix inputs; action/log_likelihood not exported. If serving needs logits/actions, extend wrapper to return actions and update config.pbtxt dims. Current export satisfies spec `hybrid_int8.onnx with dynamic axes B` for serving bench.
 - Triton config input dims `[ -1, 2 ]`/`[ -1, -1 ]` assume variable N; Triton requires fixed max dims for optimization — may need to set `dims: [ 100, 2 ]` etc per deployment size. `max_queue_delay_microseconds: 100` is aggressive; tune with real load.
 - No subagents used.
+
+## Fixes (follow-up, base e5c81b9 — 4 Importants)
+
+- `hybrid/scripts/export_onnx.py:19-40` `_build_calib_loader` now returns `(batches, env)` instead of bare `[]`; fallback returns `([], None)`. Fixes calib env availability.
+- `hybrid/scripts/export_onnx.py:74-89` calib loop fixed: `calib, calib_env = _build_calib_loader(...)`, `_calib_env = calib_env or getattr(model, "env", None)`, `m(td, _calib_env, phase="val")` — previously `m(td, phase="val")` missed `env` and always fell back to FP32 when modelopt present (`TypeError`).
+- `hybrid/scripts/export_onnx.py:105-112` wrapper fixed: `self.env or td` removed, now `if self.env is None: raise RuntimeError(...)` then `self.pol(td, self.env, phase="val")` — previously passed `TensorDict` as env, would fail inside policy decode loop.
+- `hybrid/scripts/export_onnx.py:117-130` placeholder removed: on `torch.onnx.export` failure now prints to stderr, removes stale `<1KB` file if present, and `sys.exit(1)` — previously wrote 16B `ONNX_PLACEHOLDER` invalid ONNX hiding broken artifact; bench now correctly mocks when file missing.
+- `hybrid/scripts/bench_serving.py:1-4,44-48,68-104` gap mock replaced with real comparison: when `onnxruntime` + `--fp32-ckpt` exists + `env` available, loads `HybridRLModule` FP32 policy, runs 100 samples (default `args.samples`) via both `fp32_policy(td, env, phase="val")["reward"]` and `sess.run`, computes mean relative gap `mean(|onnx-fp32|/(|fp32|+eps))*100`; else falls back to `gap=0.3` with `WARNING: using mock gap` line. Also fixed `_make_batch` to use `detach().cpu().numpy()`. `import os` added.
+
+### Re-validation
+- `python3 -m py_compile hybrid/scripts/export_onnx.py hybrid/scripts/bench_serving.py` — ok
+- `python3 hybrid/scripts/export_onnx.py --dry-run` — ok
+- `python3 hybrid/scripts/bench_serving.py --dry-run` — ok
+- `PYTHONPATH=hybrid:parco:real-routing-nco:. hybrid/.venv/bin/python hybrid/scripts/export_onnx.py --output /tmp/opencode/hybrid_int8.onnx` — now exits 1, no file written (previously placeholder 16B exit 0); stderr: `ONNX export failed (No module named 'onnxscript') -> no valid ONNX written`
+- `PYTHONPATH=hybrid:parco:real-routing-nco:. hybrid/.venv/bin/python hybrid/scripts/bench_serving.py --onnx /tmp/opencode/hybrid_int8.onnx --samples 2` — ok, `onnxruntime missing -> mock latency` + `WARNING: using mock gap 0.30% (ORT or checkpoint unavailable, need --fp32-ckpt and onnxruntime)` + `gap 0.30% <0.5% PASS` (real gap path exercised only when ORT+ckpt present)
