@@ -1,20 +1,60 @@
 """Sweep balance_weight and log fairness metrics to CSV."""
-import argparse, csv, subprocess, sys, os
+import argparse, csv, os, subprocess, sys
 WEIGHTS=[0,0.05,0.1,0.2]; EXP="hybrid_hcvrp_4gb"; EPOCHS=10; OUT="hybrid/logs/sweep_balance.csv"
-def cmd(w, exp, ep): return [sys.executable,"hybrid/train.py",f"experiment={exp}",f"env.balance_weight={w}",f"trainer.max_epochs={ep}"]
-def dry(ws, exp, ep, out):
+KEYS=["balance/time_cv","balance/time_max_min_ratio","balance/visits_cv"]
+FIELDS=["balance_weight"]+KEYS+["status"]
+def cmd(w,exp,ep): return [sys.executable,"hybrid/train.py",f"experiment={exp}",f"env.balance_weight={w}",f"trainer.max_epochs={ep}"]
+def dry(ws,exp,ep,out):
     print(f"[dry-run] experiment={exp} epochs={ep} output={out}")
-    for w in ws: print(f"  balance_weight={w}: {' '.join(cmd(w,exp,ep))} -> {out} (balance/time_cv,time_max_min_ratio,visits_cv)")
+    for w in ws: print(f"  balance_weight={w}: {' '.join(cmd(w,exp,ep))} -> {out} ({','.join(KEYS)})")
     print("dry-run done")
-def run(ws, exp, ep, out):
+def _via_hydra(w,exp,ep):
+    try:
+        from hydra import compose, initialize
+        from hybrid.train import run as train_run
+        from hydra.core.global_hydra import GlobalHydra
+    except Exception as e: return None, f"import_fail: {e}"
+    try:
+        if GlobalHydra.instance().is_initialized(): GlobalHydra.instance().clear()
+        with initialize(version_base="1.3", config_path="../configs"):
+            cfg=compose(config_name="main.yaml", overrides=[f"experiment={exp}",f"env.balance_weight={w}",f"trainer.max_epochs={ep}"])
+        metric_dict,_=train_run(cfg)
+        vals={}
+        for k in KEYS:
+            v=metric_dict.get(k)
+            if v is None: vals[k]=""
+            else:
+                try: vals[k]=float(v.mean().item() if hasattr(v,"mean") else float(v))
+                except Exception: vals[k]=str(v)
+        return vals, "success"
+    except Exception as e: return None, f"fail: {e}"
+    finally:
+        try:
+            from hydra.core.global_hydra import GlobalHydra
+            if GlobalHydra.instance().is_initialized(): GlobalHydra.instance().clear()
+        except Exception: pass
+def run(ws,exp,ep,out):
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True); rows=[]
+    # prefer in-process Hydra if available, else subprocess fallback
+    use_hydra=False
+    try: import hydra, torch; use_hydra=True
+    except Exception: use_hydra=False
     for w in ws:
-        c=cmd(w,exp,ep); print(f"\n=== balance_weight={w} ===\n{' '.join(c)}")
-        r=subprocess.run(c)
-        if r.returncode!=0: print(f"  WARNING: failed weight={w} exit {r.returncode}")
-        rows.append({"balance_weight":w,"balance/time_cv":"","balance/time_max_min_ratio":"","balance/visits_cv":""})
+        status="success"; vals={k:"" for k in KEYS}
+        if use_hydra:
+            got, status=_via_hydra(w,exp,ep)
+            if got is not None: vals=got
+            else: print(f"  hydra failed weight={w}: {status} -> subprocess fallback")
+            if got is None: use_hydra=False  # fallback for remaining
+        if not use_hydra or vals=={k:"" for k in KEYS} and status.startswith("fail"):
+            c=cmd(w,exp,ep); print(f"\n=== balance_weight={w} ===\n{' '.join(c)}")
+            r=subprocess.run(c)
+            if r.returncode!=0: status=f"fail:{r.returncode}"; print(f"  WARNING: failed weight={w} exit {r.returncode}")
+            else: status="success"  # subprocess ok but metrics unknown -> empty strings kept
+        row={"balance_weight":w, **vals, "status":status}
+        rows.append(row)
     with open(out,"w",newline="") as f:
-        w=csv.DictWriter(f,fieldnames=["balance_weight","balance/time_cv","balance/time_max_min_ratio","balance/visits_cv"]); w.writeheader(); w.writerows(rows)
+        w=csv.DictWriter(f, fieldnames=FIELDS); w.writeheader(); w.writerows(rows)
     print(f"Wrote {len(rows)} rows to {out}")
 def main():
     p=argparse.ArgumentParser(description="Sweep balance_weight")
