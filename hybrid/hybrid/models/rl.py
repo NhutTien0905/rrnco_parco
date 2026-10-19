@@ -416,9 +416,11 @@ class HybridRLModule(PARCORLModule):
             )
 
             # ── loss_ss (augmentation symmetricity) ─────────────
-            # reward: [B, n_start, n_aug] — average over n_aug (dim=2)
+            # reward: [B, n_start, n_aug] when n_start>1 else [B, n_aug] — dim depends
+            # fix: when n_start is 0/1, reward is 2D [B, n_aug] so dim=1; when 3D, dim=2
+            _ss_dim = 2 if n_start > 1 else 1
             loss_ss = (
-                solution_symmetricity_loss(shaped_reward, ll, dim=2)
+                solution_symmetricity_loss(shaped_reward, ll, dim=_ss_dim)
                 if n_aug > 1
                 else 0
             )

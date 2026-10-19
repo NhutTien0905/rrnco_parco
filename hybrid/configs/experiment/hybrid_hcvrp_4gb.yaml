@@ -19,7 +19,7 @@ generator_params:
 
 # Model hyperparameters
 model:
-  micro_batch_aug: 2
+  micro_batch_aug: 4
   policy:
     _target_: "hybrid.models.policy.HybridPolicy"
     env_name: "${env.name}"
@@ -53,7 +53,7 @@ model:
     gamma: 0.1
   lr_scheduler_interval: "epoch"
   warmup_epochs: 1
-  num_augment: 2
+  num_augment: 4
   train_min_agents: 3
   train_max_agents: ${env.generator_params.num_agents}
   train_min_size: 60
