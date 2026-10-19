@@ -457,8 +457,30 @@ class HybridRLModule(PARCORLModule):
             )
 
         # ── 1. Distance bias alpha (learnable parameter) ─────────
+        # Hetero: alpha_net outputs per-agent [B,m] alpha; log its mean
         decoder = self.policy.decoder
-        if hasattr(decoder, "alpha") and hasattr(decoder, "use_distance_bias"):
+        if hasattr(decoder, "alpha_net") and getattr(decoder, "use_distance_bias", False):
+            try:
+                if "agents_capacity" in td.keys() and "agents_speed" in td.keys():
+                    cap, spd = td["agents_capacity"], td["agents_speed"]
+                elif "capacity" in td.keys() and "speed" in td.keys():
+                    cap, spd = td["capacity"], td["speed"]
+                else:
+                    cap = spd = None
+                if cap is not None:
+                    with torch.no_grad():
+                        feat = torch.stack([cap.float(), spd.float()], dim=-1)  # [B,m,2]
+                        alphas = decoder.alpha_net(feat).squeeze(-1).abs()  # [B,m]
+                        _log("distance_bias/alpha", alphas.mean())
+                else:
+                    _log("distance_bias/alpha", decoder.alpha_net[2].bias.data.mean())
+            except Exception:
+                # Fallback: mean of last bias param
+                try:
+                    _log("distance_bias/alpha", decoder.alpha_net[2].bias.data.mean())
+                except Exception:
+                    pass
+        elif hasattr(decoder, "alpha") and hasattr(decoder, "use_distance_bias"):
             _log("distance_bias/alpha", decoder.alpha.data.mean())
 
         # ── 2. Per-agent tour stats ──────────────────────────────
@@ -527,6 +549,35 @@ class HybridRLModule(PARCORLModule):
                 customer_visited = visited[..., num_agents:] if visited.shape[-1] > num_agents else visited
                 visited_ratio = customer_visited.float().mean()
                 _log("decode/visited_ratio", visited_ratio, prog=(phase != "train"))
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        """Allow loading old checkpoints with ``policy.decoder.alpha``.
+
+        Old checkpoints have a single scalar ``alpha``; new code has ``alpha_net``.
+        We migrate here so ``HybridRLModule.load_from_checkpoint(..., strict=False)``
+        is not required — but if strict=True and old key present, we still load
+        with strict=False and seed ``alpha_net`` bias from the old value.
+        """
+        # Lightning checkpoints nest under "state_dict" already unwrapped by caller;
+        # at module level keys look like "policy.decoder.alpha".
+        has_old = any(k.endswith("decoder.alpha") for k in state_dict.keys())
+        has_new = any("decoder.alpha_net" in k for k in state_dict.keys())
+        if has_old and not has_new:
+            # Pop old alpha keys and seed new decoder's alpha_net bias
+            old_keys = [k for k in list(state_dict.keys()) if k.endswith("decoder.alpha")]
+            for k in old_keys:
+                old_alpha = state_dict.pop(k)
+                try:
+                    old_val = float(old_alpha.mean().item()) if hasattr(old_alpha, "mean") else float(old_alpha)
+                except Exception:
+                    old_val = 1.0
+                try:
+                    with torch.no_grad():
+                        self.policy.decoder.alpha_net[2].bias.fill_(old_val)
+                except Exception:
+                    pass
+            return super().load_state_dict(state_dict, strict=False)
+        return super().load_state_dict(state_dict, strict=strict)
 
     def on_before_optimizer_step(self, optimizer):
         """Log gradient norms before optimizer step.

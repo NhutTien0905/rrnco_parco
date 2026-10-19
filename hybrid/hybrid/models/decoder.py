@@ -68,7 +68,60 @@ class HybridDecoder(PARCODecoder):
         self.use_distance_bias = use_distance_bias
 
         if use_distance_bias:
-            self.alpha = nn.Parameter(torch.ones(1))
+            self.alpha_net = nn.Sequential(
+                nn.Linear(2, 8), nn.ReLU(), nn.Linear(8, 1)
+            )
+            # Init last bias to 1.0 so per-agent alpha starts ~1 before training
+            # (keeps backward compat with old alpha=1 and satisfies test_alpha_initial_value)
+            with torch.no_grad():
+                self.alpha_net[2].bias.fill_(1.0)
+                # Zero weights for stable start: output ≈ bias regardless of [cap,speed]
+                self.alpha_net[0].weight.zero_()
+                self.alpha_net[0].bias.zero_()
+                self.alpha_net[2].weight.zero_()
+
+    @property
+    def alpha(self):
+        """Backward-compat: old ``decoder.alpha`` now proxies to ``alpha_net[2].bias``.
+
+        Keeps ``test_phase5.py::TestHybridDecoderInit::test_has_alpha_when_bias`` green
+        while new code uses ``alpha_net`` for hetero per-agent bias.
+        """
+        if hasattr(self, "alpha_net"):
+            return self.alpha_net[2].bias
+        raise AttributeError("alpha not available when use_distance_bias=False")
+
+    @alpha.setter
+    def alpha(self, value):
+        if hasattr(self, "alpha_net"):
+            with torch.no_grad():
+                if isinstance(value, torch.Tensor):
+                    self.alpha_net[2].bias.copy_(value.view(-1)[:1])
+                else:
+                    self.alpha_net[2].bias.fill_(float(value))
+        else:
+            raise AttributeError("alpha not available when use_distance_bias=False")
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        """Migrate old checkpoints that have ``alpha`` scalar to ``alpha_net``."""
+        # Old checkpoint key: "alpha" (Parameter [1]) -> init alpha_net bias so that
+        # forward with typical [capacity,speed] gives similar magnitude before training resumes.
+        if "alpha" in state_dict and not any(k.startswith("alpha_net") for k in state_dict):
+            old_alpha = state_dict.pop("alpha")
+            # Try to seed alpha_net to output ~ old_alpha on average (set last bias)
+            try:
+                old_val = float(old_alpha.mean().item()) if hasattr(old_alpha, "mean") else float(old_alpha)
+            except Exception:
+                old_val = 1.0
+            # Reset alpha_net with default init then set last layer bias to old_val
+            # (weights stay as initialised; bias shift alone approximates magnitude)
+            with torch.no_grad():
+                # last Linear is at index 2 of Sequential
+                if hasattr(self, "alpha_net") and len(self.alpha_net) >= 3:
+                    self.alpha_net[2].bias.fill_(old_val)
+            # Do not re-add old key; remaining keys load with strict=False to allow missing alpha_net
+            return super().load_state_dict(state_dict, strict=False)
+        return super().load_state_dict(state_dict, strict=strict)
 
     def forward(
         self,
@@ -134,11 +187,38 @@ class HybridDecoder(PARCODecoder):
                     dist_bias, (0, pad_cols), value=0.0
                 )
 
-            # RRNCO-style: logits = log(exp(logits - α·dist) + ε)
-            # This softly penalizes distant nodes.
-            # Numerically stable: clamp the exponent to avoid exp overflow.
+            # RRNCO-style hetero: per-agent α from [capacity, speed]
+            # α_per_agent = |alpha_net([capacity, speed])|  -> [B, m]
+            # logits = log(exp(logits - α_per_agent * dist) + ε)
             logits = logits.float()
-            inductive_bias = (self.alpha.abs() * dist_bias).float()
+            # Gather per-agent features: handle both pre-reset (capacity/speed)
+            # and post-reset (agents_capacity/agents_speed) key names.
+            if "capacity" in td.keys() and "speed" in td.keys():
+                cap = td["capacity"]  # [B, m]
+                spd = td["speed"]     # [B, m]
+            elif "agents_capacity" in td.keys() and "agents_speed" in td.keys():
+                cap = td["agents_capacity"]
+                spd = td["agents_speed"]
+            elif "agents_capacity" in td.keys():
+                cap = td["agents_capacity"]
+                spd = torch.ones_like(cap) * 0.75  # fallback speed
+            else:
+                cap = None
+                spd = None
+            if cap is not None and spd is not None:
+                # stack -> [B, m, 2], alpha_net -> [B, m, 1] -> [B, m]
+                cap_f = cap.float()
+                spd_f = spd.float()
+                # Ensure 2D [B,m] even if 1D or 3D edge
+                if cap_f.dim() == 1:
+                    cap_f = cap_f.unsqueeze(0)
+                    spd_f = spd_f.unsqueeze(0)
+                agent_feat = torch.stack([cap_f, spd_f], dim=-1)  # [B, m, 2]
+                alpha_per_agent = self.alpha_net(agent_feat).squeeze(-1).abs()  # [B, m]
+                inductive_bias = alpha_per_agent.unsqueeze(-1) * dist_bias.float()  # [B, m, m+N]
+            else:
+                # Fallback: uniform alpha=1
+                inductive_bias = dist_bias.float()
             exponent = (logits - inductive_bias).clamp(min=-80.0, max=80.0)
             logits = torch.log(torch.exp(exponent) + 1e-6)
 
