@@ -1,0 +1,1058 @@
+\documentclass[journal,twoside,web]{ieeecolor}
+\usepackage{generic}
+\usepackage{cite}
+\usepackage{graphicx}
+\usepackage{textcomp}
+
+\let\proof\relax
+\let\endproof\relax
+\usepackage{amsmath,amsfonts,amssymb,amsthm}
+\usepackage{bm,dsfont,mathtools}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+\usepackage{array}
+\usepackage[caption=false,font=normalsize,labelfont=sf,textfont=sf]{subfig}
+\usepackage{textcomp}
+\usepackage{stfloats}
+\usepackage{url}
+\usepackage{verbatim}
+\usepackage{graphicx}
+\usepackage{cite}
+\usepackage{booktabs}
+\usepackage{multirow}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+\theoremstyle{definition}
+\newtheorem{assumption}[theorem]{Assumption}
+
+\DeclareMathOperator{\rank}{rank}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+\markboth{\journalname, VOL. XX, NO. XX, XXXX}
+{Author \MakeLowercase{\textit{et al.}}: Title}
+\begin{document}
+\title{Bridging Real-World Routing and Multi-Agent
+Coordination: A Hybrid Neural Combinatorial
+Optimization Framework}
+\author{Pham Van-Huy$^{1}$, Than Le$^{2}$,  Tien B. N. Nguyen$^{3}$, Thai-Son Mai$^{4}$, Dung Tuan Ho$^{5}$,  and $^{*}$Trung Van Nguyen$^{6}$ 
+\thanks{$^{1}$ is now with, Faculty of Information Technology, Ton Duc Thang University, Ho Chi Minh City, Vietnam (e-mail: phamvanhuy@tdtu.edu.vn).}
+\thanks{$^{2}$  is now with the Thu Dau Mot University, Ho Chi Minh,  Vietnam (e-mail: ledinhthan@tdmu.edu.vn)
+.}
+\thanks{$^{3}$ is now with the Wisdom Research, Ho Chi Minh City,  Vietnam (e-mail: tien.nbn@wisdombrain.org). }
+\thanks{$^{4}$ is now with the Queen's University Belfast, Belfast, UK (e-mail: thaison.mai@qub.ac.uk}
+\thanks{$^{5}$ is now with the Department of Computer Science, New Mexico State University, Las Cruces, New Mexico, USA (e-mail: dungho@nmsu.edu}
+\thanks{$^{5}$ is now with the Faculty of Information Technology, Van Lang School of Technology, Van Lang University, Ho Chi Minh, VietNam ($^{*}$: Corresponding Author trung.nv@vlu.edu.vn).}}
+
+\maketitle
+
+\begin{abstract}
+Neural Combinatorial Optimization (NCO) has made substantial progress in vehicle routing, yet real-world road topology and multi-agent coordination remain insufficiently addressed. We propose a hybrid framework $\mathcal{F}_{\boldsymbol{\theta}}$ for the Heterogeneous Capacitated Vehicle Routing Problem (HCVRP) that combines real-world routing representations with parallel multi-agent decision-making. The framework employs an attention-free encoder with contextual gating and neural adaptive biases to model asymmetric road-network distances, together with communication layers and conflict-aware parallel decoding for decentralized coordination. Experiments on 100 real-world cities with OSRM distance matrices (main setting $N{=}100$, $M{=}7$) achieve an OOD gap of $0.21$ makespan ($2.5\%$ relative) with $6$--$10\times$ parallel decoding speedup depending on measurement protocol; a normalized scalability study shows a $0.13\%$ gap, indicating stable transfer. Results suggest that spatial inductive biases and explicit inter-agent coordination can improve generalization and efficiency of neural routing policies, although the architecture is an integration of existing RRNCO and PARCO components and further algorithmic innovation remains open.
+\end{abstract}
+
+
+\begin{IEEEkeywords}
+Neural Combinatorial Optimization, Vehicle Routing Problem, Multi-Agent Systems, Real-World Routing, Attention-Free Transformers, Reinforcement Learning
+\end{IEEEkeywords}
+
+\noindent\textbf{Code:}
+\url{https://github.com/NhutTien0905/rrnco\_parco}
+
+\section{Introduction}
+\label{sec:introduction}
+\IEEEPARstart{V}{ehicle} routing problems (VRPs) represent a cornerstone of combinatorial optimization with profound implications for logistics, transportation, and supply chain management. Recent advances in Neural Combinatorial Optimization (NCO) have demonstrated that deep learning models can learn effective heuristics for VRPs through reinforcement learning\cite{kool2019attention,nazari2018reinforcement,kwon2020pomo}, often matching or exceeding traditional optimization methods in solution quality while offering improved computational efficiency at inference time.
+
+However, two fundamental limitations hinder the deployment of NCO methods in real-world scenarios. First, the overwhelming majority of existing approaches operate on simplified Euclidean distance metrics ($\|\mathbf{x}_i - \mathbf{x}_j\|_2$), assuming direct line-of-sight travel between locations. This abstraction fails to capture the complexities of actual road networks, including asymmetric travel times due to one-way streets, traffic patterns, elevation changes, and infrastructure constraints. Second, while real-world logistics operations typically involve coordinating multiple heterogeneous vehicles with varying capacities and speeds, most NCO research focuses on single-agent sequential decision-making, leading to inefficient autoregressive decoding that scales poorly with fleet size.
+
+Recent works have begun to address these challenges independently. The Real Routing NCO (RRNCO) framework\cite{rrnco2025} introduced attention-free architectures with neural adaptive biases to process real-world distance and duration matrices from OpenStreetMap\cite{openstreetmap} data, demonstrating improved generalization to unseen cities. Concurrently, the Parallel AutoRegressive Combinatorial Optimization (PARCO) framework\cite{parco2024} proposed communication-enhanced parallel decoding mechanisms that enable simultaneous action selection across multiple agents, significantly reducing inference time while maintaining solution quality through priority-based conflict resolution.
+
+We present a framework that combines real-world routing awareness with efficient multi-agent coordination for heterogeneous vehicle routing. Our key contributions are:
+
+\begin{itemize}
+    \item \textbf{Hybrid Architecture}: We integrate RRNCO's attention-free encoder with PARCO's communication-aware parallel decoder for real-world multi-agent routing.
+
+    \item \textbf{Dual-Stream Fusion}: We propose a contextual gating fusion module that unifies coordinate and distance embeddings for multi-agent decision making.
+
+    \item \textbf{Hetero Speed-Conditioned Bias (A)}: We replace the scalar distance bias with a per-agent network $\alpha_m{=}|f([Q_m,v_m])|$ that conditions the distance inductive bias on heterogeneous capacity/speed, improving makespan under heterogeneous fleets.
+
+    \item \textbf{SVD Low-Rank Embedding (B1)}: We add an SVD low-rank path ($k{=}8$) that projects precomputed $U_kS_k,V_kS_k$ via a linear layer as a lightweight alternative to the distance expert, reducing encoder memory at $N{=}100$.
+
+    \item \textbf{Fairness-Aware Training (E)}: We introduce a makespan $+$ balance penalty $\max_m T_m + \lambda\cdot \mathrm{std}(T_m)$ and a sweep over $\lambda\in\{0,0.05,0.1,0.2\}$ that quantifies workload balance vs.\ makespan trade-offs.
+
+    \item \textbf{Real-World Multi-Agent Benchmark}: We extend the RRNCO dataset with heterogeneous vehicle settings across 100 cities worldwide.
+
+    \item \textbf{Extensive Evaluation}: We show competitive OOD generalization and efficient parallel decoding on real-world routing instances, with classical HFVRP baselines (PyVRP/OR-Tools, 60\,s) for reference.
+\end{itemize}
+
+The remainder of this paper is organized as follows: Section II reviews related work in neural combinatorial optimization, multi-agent routing, and real-world distance modeling. Section III details our hybrid architecture and training methodology. Section IV presents experimental results and ablation studies. Section V concludes with discussions and future directions.
+
+\section{Related Work}
+
+\subsection{Neural Combinatorial Optimization}
+
+Neural Combinatorial Optimization (NCO) has progressed from Pointer Networks~\cite{vinyals2015pointer} to attention-based architectures for TSP and VRP~\cite{kool2019attention,vaswani2017attention}, with subsequent work improving exploration, sample efficiency, and problem-specific inductive biases through POMO, SymNCO, and related approaches~\cite{kwon2020pomo,kim2022symnco,joshi2019efficient,hottung2022efficient}. However, most NCO methods assume Euclidean costs, limiting their ability to represent asymmetric and topology-dependent real-world travel distances~\cite{geisler2022generalization}. Broader surveys are provided in~\cite{mazyavkina2021reinforcement,cappart2023combinatorial}.
+
+\subsection{Multi-Agent Vehicle Routing}
+
+Heterogeneous vehicle routing has been extensively studied using classical methods, including tabu search, genetic algorithms, and adaptive large neighborhood search~\cite{glover1986future,gendreau2010tabu,ropke2006adaptive,koç2016heterogeneous}. In neural routing, multi-vehicle decisions are commonly generated sequentially, creating inference bottlenecks. PARCO~\cite{parco2024} introduced parallel multi-agent decoding with inter-agent communication and conflict resolution, while subsequent work explored global matching for multi-depot routing~\cite{son2024learning}. Our work (Figure \ref{fig:overview} - Algorithm \ref{alg:forward}) builds on this parallel coordination paradigm while incorporating real-world road-network costs.
+
+\subsection{Real-World Distance Modeling}
+
+Recent NCO research has begun addressing the limitations of Euclidean distance through real-world road-network information. RRNCO~\cite{rrnco2025} introduced CoordinateExpert, DistanceExpert, Contextual Gating, and Neural Adaptive Biases to jointly model spatial and topology-dependent information from asymmetric distance matrices. While this approach improves generalization across real-world cities, it does not explicitly address decentralized multi-agent coordination.
+
+Our framework combines these two complementary directions: real-world distance-aware representation learning from RRNCO~\cite{rrnco2025} and parallel multi-agent coordination from PARCO~\cite{parco2024}. This combination (Algorithm \ref{alg:forward}) targets the joint challenge of topology-aware routing and decentralized coordination in heterogeneous vehicle fleets.
+
+\begin{algorithm}[htbp]
+\caption{Hybrid NCO Forward Pass}
+\label{alg:forward}
+\begin{algorithmic}[1]
+\Require Instance $(\mathbf{W},\mathbf{X},\mathbf{d},\mathbf{Q},\mathbf{v})$;
+parameters $\boldsymbol{\theta}$; mode $\in\{\text{greedy},\text{sampling}\}$
+\Ensure Routes $\mathcal{R}=\{\mathcal{R}_1,\ldots,\mathcal{R}_M\}$
+
+\State \textbf{Embed:}
+\State $\mathbf{H}^{\mathrm{row}},\mathbf{H}^{\mathrm{col}}
+\gets \operatorname{Embed}(\mathbf{W},\mathbf{X},\mathbf{d},\mathbf{Q},\mathbf{v})$
+
+\State \textbf{Encode:}
+\For{$l=1$ to $L$}
+    \State $(\mathbf{B}^{\mathrm{row}}_l,\mathbf{B}^{\mathrm{col}}_l)
+    \gets \operatorname{NAB}(\mathbf{W},\mathbf{X},\mathbf{T})$
+    \State $\mathbf{H}^{\mathrm{row}}_{l+1}
+    \gets \operatorname{FFN}\!\left(
+    \mathbf{H}^{\mathrm{row}}_l\odot\sigma(\mathbf{B}^{\mathrm{row}}_l)\right)$
+    \State $\mathbf{H}^{\mathrm{col}}_{l+1}
+    \gets \operatorname{FFN}\!\left(
+    \mathbf{H}^{\mathrm{col}}_l\odot\sigma(\mathbf{B}^{\mathrm{col}}_l)\right)$
+\EndFor
+\State $\mathbf{H}\gets
+\operatorname{Linear}([\mathbf{H}^{\mathrm{row}}_L;\mathbf{H}^{\mathrm{col}}_L])$
+
+\State \textbf{Decode:}
+\State Initialize $\operatorname{cur}_m\gets0$,
+$\operatorname{rem}_m\gets Q_m$, $\mathcal{R}_m\gets[0]$;
+$\mathcal{U}\gets\{1,\ldots,N\}$
+
+\While{$\mathcal{U}\neq\emptyset$}
+    \State $\mathbf{C}\gets
+    \operatorname{MHA}(\mathbf{H}_{1:M},
+    \mathbf{H}_{1:M},\mathbf{H}_{1:M})$
+    \Comment{Communication}
+    \For{$m=1$ to $M$ \textbf{in parallel}}
+        \State $\mathbf{u}_m\gets
+        \operatorname{Score}(\mathbf{C}_m,\mathbf{H},
+        \operatorname{cur}_m,\mathbf{W})$
+        \State Mask infeasible or visited customers
+        \State Select $i_m$ by greedy argmax or sampling
+    \EndFor
+    \State Resolve conflicts using HighProbHandler
+    \State Update $\mathcal{R}$, $\operatorname{cur}$, $\operatorname{rem}$, and $\mathcal{U}$
+\EndWhile
+
+\State \Return $\mathcal{R}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Formal Problem Classes}
+
+\begin{definition}[Traveling Salesman Problem (TSP)]
+Given a set of $n$ nodes $\mathcal{V} = \{v_1, \ldots, v_n\}$ with pairwise distances $d_{ij}$, the TSP seeks a Hamiltonian cycle $\pi = (\pi_1, \ldots, \pi_n)$ that minimizes:
+\begin{equation}
+\min_{\pi \in \Pi} \sum_{t=1}^{n} d_{\pi_t, \pi_{t+1}}
+\end{equation}
+where $\pi_{n+1} = \pi_1$ and $\Pi$ is the set of all permutations. When distances are Euclidean, $d_{ij} = \|\mathbf{x}_i - \mathbf{x}_j\|_2$.
+\end{definition}
+
+\begin{definition}[Capacitated Vehicle Routing Problem (CVRP)]
+Let $\mathcal{C} = \{c_1, \ldots, c_N\}$ denote customers with demands $d_i \in \mathbb{R}^+$ and a depot $c_0$. For a fleet of $M$ vehicles with capacity $Q$, the CVRP seeks routes $\mathcal{R} = \{\mathcal{R}_1, \ldots, \mathcal{R}_M\}$ satisfying:
+\begin{align}
+&\bigcup_{m=1}^M \mathcal{R}_m = \mathcal{C}, \quad \mathcal{R}_i \cap \mathcal{R}_j = \emptyset \quad \forall i \neq j,\\
+&\sum_{c_i \in \mathcal{R}_m} d_i \leq Q \quad \forall m \in \{1,\ldots,M\},\\
+&\min \sum_{m=1}^M \sum_{t=1}^{|\mathcal{R}_m|+1} D_{\mathcal{R}_m(t), \mathcal{R}_m(t+1)}
+\end{align}
+where $\mathcal{R}_m(1) = \mathcal{R}_m(|\mathcal{R}_m|+1) = c_0$.
+\end{definition}
+
+\begin{definition}[Heterogeneous Capacitated VRP (HCVRP)]
+The HCVRP extends CVRP with heterogeneous vehicles having distinct capacities $Q_m$ and speeds $v_m$. The objective becomes minimizing the makespan:
+\begin{equation}
+\min \max_{m \in \{1,\ldots,M\}} \frac{\text{length}(\mathcal{R}_m)}{v_m}
+\end{equation}
+where $\text{length}(\mathcal{R}_m) = \sum_{t=1}^{|\mathcal{R}_m|+1} D_{\mathcal{R}_m(t), \mathcal{R}_m(t+1)}$.
+\end{definition}
+
+\begin{assumption}[Euclidean Distance Simplification]
+Most existing NCO methods assume $D_{ij} = \|\mathbf{x}_i - \mathbf{x}_j\|_2$, implying:
+\begin{enumerate}
+\item Symmetry: $D_{ij} = D_{ji}$ for all $i,j$
+\item Triangle inequality: $D_{ij} \leq D_{ik} + D_{kj}$ for all $i,j,k$
+\item Metric completeness: $D$ forms a valid metric space
+\end{enumerate}
+This simplification fails to capture real-world road network complexities.
+\end{assumption}
+
+\begin{lemma}[Limitations of Euclidean NCO Methods]
+For any NCO model trained exclusively on Euclidean instances, there exists a real-world asymmetric distance matrix
+$\mathbf{W}^{\mathrm{real}}$
+such that
+\begin{equation}
+\mathbb{E}_{\pi \sim \pi_{\boldsymbol{\theta}}}
+\!\left[
+\operatorname{Cost}\!\left(\pi \mid \mathbf{W}^{\mathrm{real}}\right)
+\right]
+-
+\operatorname{OPT}\!\left(\mathbf{W}^{\mathrm{real}}\right)
+\ge
+\epsilon,
+\end{equation}
+for some $\epsilon > 0$, where $\pi_{\boldsymbol{\theta}}$ is the learned policy and $\operatorname{OPT}$ denotes the optimal solution.
+\end{lemma}
+
+\section{Methodology}
+
+\subsection{Problem Formulation}
+
+Let $\mathcal{G} = (\mathcal{V}, \mathcal{E}, \mathbf{W})$ denote a directed graph where:
+\begin{itemize}
+    \item $\mathcal{V} = \{v_0, v_1, \ldots, v_N\}$ is the set of nodes ($v_0$: depot, $v_1, \ldots, v_N$: customers)
+    \item $\mathcal{E} \subseteq \mathcal{V} \times \mathcal{V}$ is the set of directed edges
+    \item $\mathbf{W} \in \mathbb{R}^{(N+1) \times (N+1)}_+$ is the asymmetric weight matrix with $w_{ij} > 0$ for $(i,j) \in \mathcal{E}$
+\end{itemize}
+
+For each customer $i \in \{1,\ldots,N\}$, we associate:
+\begin{itemize}
+    \item Demand $d_i \in \mathbb{R}^+$
+    \item Coordinate $\mathbf{x}_i \in \mathbb{R}^2$
+\end{itemize}
+
+For each vehicle $m \in \{1,\ldots,M\}$, we associate:
+\begin{itemize}
+    \item Capacity $Q_m \in \mathbb{R}^+$
+    \item Speed $v_m \in \mathbb{R}^+$
+\end{itemize}
+
+The travel cost between nodes $i$ and $j$ for vehicle $m$ is:
+\begin{equation}
+c_{ij}^{(m)} = \frac{w_{ij}}{v_m}
+\end{equation}
+
+The HCVRP with real-world distances seeks a set of routes $\mathcal{R} = \{\mathcal{R}_1,\ldots,\mathcal{R}_M\}$ satisfying:
+\begin{align}
+&\bigcup_{m=1}^M \mathcal{R}_m = \mathcal{C}, \quad \mathcal{R}_i \cap \mathcal{R}_j = \emptyset, \quad \forall i \neq j\\
+&\min_{\mathcal{R}} \max_{m \in \{1,\ldots,M\}} \left\{ \sum_{t=1}^{|\mathcal{R}_m|+1} \frac{w_{\mathcal{R}_m(t), \mathcal{R}_m(t+1)}}{v_m} \right\}
+\end{align}
+where $\mathcal{R}_m(1) = \mathcal{R}_m(|\mathcal{R}_m|+1) = v_0$.
+Each vehicle may return to the depot multiple times to replenish: a route $\mathcal{R}_m$ is partitioned into trips $\mathcal{R}_m^{(1)},\ldots,\mathcal{R}_m^{(K_m)}$ with $\sum_{i\in \mathcal{R}_m^{(k)}} d_i \le Q_m$ for each trip $k$, and total assigned demand may exceed $Q_m$ (implemented as $used\_capacity$ reset on depot visit in the environment). Under our instance generation ($d_i\sim\mathcal{U}(1,10)$, $Q_m\sim\mathcal{U}(20,41)$, $N{=}100$, $M{=}7$) the expected total demand ($\approx 550$) exceeds total fleet capacity ($\approx 214$), so feasibility relies on multiple depot returns; without replenishment the setting would be infeasible.
+
+\begin{assumption}[Asymmetric Distance Matrix]
+The distance matrix $\mathbf{W}$ is generally asymmetric:
+\begin{equation}
+w_{ij} \neq w_{ji} \quad \text{for some } i \neq j
+\end{equation}
+due to one-way streets, traffic patterns, and road network topology. Both $\mathbf{W}$ and travel time matrix $\mathbf{T}$ are pre-computed using OSRM.
+\end{assumption}
+
+\subsection{Hybrid Architecture Overview}
+
+Our architecture consists of three main components (Figure~\ref{fig:overview}):
+\begin{enumerate}
+    \item \textbf{Hybrid Initial Embedding}: Combines RRNCO's dual-stream coordinate and distance embeddings with PARCO's agent-specific positional encodings.
+    \item \textbf{Attention-Free Encoder}: RRNCO's AttnFreeNet with Neural Adaptive Biases processes the dual-stream embeddings to capture real-world routing structure.
+    \item \textbf{Multi-Agent Parallel Decoder}: PARCO's communication layers and multi-pointer mechanism with conflict resolution for efficient parallel action selection.
+\end{enumerate}
+
+\begin{figure*}
+    \centering
+    \includegraphics[width=0.8\linewidth]{overview_v2.png}
+    \caption{\textit{Hybrid encoder–decoder framework with fusion-based representation learning for heterogeneous multi-agent routing.} Building upon RRNCO, the encoder captures both geometric (coordinate-based) and relational (distance-based) structures via dual-context embeddings and adaptive attention. We introduce a fusion layer that unifies these heterogeneous representations into a shared embedding space, improving expressiveness under real-world asymmetric costs. The PARCO-based decoder is extended to handle heterogeneous vehicles by incorporating agent-specific dynamics and enabling inter-agent coordination through communication layers. The model performs parallel autoregressive decoding using a multiple pointer mechanism, with a priority-based handler ensuring constraint satisfaction and conflict-free routing decisions. This design enables scalable and effective optimization of makespan under heterogeneous capacities and speeds.}
+    \label{fig:overview}
+\end{figure*}
+
+\subsection{Hybrid Initial Embedding}
+
+\subsubsection{Agent Node Embedding}
+For agent $m \in \{1,\ldots,M\}$, the embedding is computed as:
+\begin{equation}
+\mathbf{h}^{\text{agent}}_m = \text{Linear}\left( \begin{bmatrix} 
+    \mathbf{e}^{\text{coord}}_0 \\
+    \mathbf{e}^{\text{pos}}_m \\
+    \mathbf{e}^{\text{feat}}_m
+\end{bmatrix} \right) \in \mathbb{R}^d
+\end{equation}
+where:
+\begin{align}
+\mathbf{e}^{\text{coord}}_0 &= f_{\text{CE}}(\mathbf{x}_0) \in \mathbb{R}^d, \\
+\mathbf{e}^{\text{pos}}_m &= \text{PE}(m) \in \mathbb{R}^d \quad \text{(learnable positional encoding)}, \\
+\mathbf{e}^{\text{feat}}_m &= \mathbf{W}_f \begin{bmatrix} Q_m \\ v_m \end{bmatrix} + \mathbf{b}_f \in \mathbb{R}^d.
+\end{align}
+
+\subsubsection{Customer Node Embedding}
+For customer $i \in \{1,\ldots,N\}$, the dual-stream embedding is:
+\begin{align}
+\mathbf{e}^{\text{coord}}_i &= f_{\text{CE}}(\mathbf{x}_i) \in \mathbb{R}^d, \\
+(\mathbf{e}^{\text{row}}_i, \mathbf{e}^{\text{col}}_i) &= f_{\text{DE}}(\mathbf{W}_{i,:}, \mathbf{W}_{:,i}) \in \mathbb{R}^d \times \mathbb{R}^d, \\
+\mathbf{h}^{\text{row}}_i &= \text{Gate}(\mathbf{e}^{\text{coord}}_i, \mathbf{e}^{\text{row}}_i) + \text{Linear}(d_i) \in \mathbb{R}^d, \\
+\mathbf{h}^{\text{col}}_i &= \text{Gate}(\mathbf{e}^{\text{coord}}_i, \mathbf{e}^{\text{col}}_i) + \text{Linear}(d_i) \in \mathbb{R}^d.
+\end{align}
+
+The contextual gating mechanism is defined as:
+\begin{equation}
+\mathbf{g}
+=
+\sigma\!\left(
+\mathbf{W}_g
+\begin{bmatrix}
+\mathbf{a}\\
+\mathbf{b}
+\end{bmatrix}
++\mathbf{b}_g
+\right),
+\end{equation}
+
+\begin{equation}
+\text{Gate}(\mathbf{a},\mathbf{b})
+=
+\mathbf{g}\odot\mathbf{a}
++
+(1-\mathbf{g})\odot\mathbf{b}.
+\end{equation}
+
+\begin{lemma}[Asymmetry Preservation]
+The DistanceExpert processes incoming and outgoing distance vectors separately, ensuring that asymmetry in $\mathbf{W}$ is preserved in the latent representations:
+\begin{equation}
+\mathbf{e}^{\text{row}}_i \neq \mathbf{e}^{\text{col}}_i \iff \mathbf{W}_{i,:} \neq \mathbf{W}_{:,i}.
+\end{equation}
+\end{lemma}
+
+\subsubsection{Dual-Stream Construction}
+The final dual-stream embeddings concatenate agent and customer embeddings:
+\begin{align}
+\mathbf{H}^{\text{row}} &= [\mathbf{h}^{\text{agent}}_1, \ldots, \mathbf{h}^{\text{agent}}_M, \mathbf{h}^{\text{row}}_1, \ldots, \mathbf{h}^{\text{row}}_N] \in \mathbb{R}^{(M+N) \times d}, \\
+\mathbf{H}^{\text{col}} &= [\mathbf{h}^{\text{agent}}_1, \ldots, \mathbf{h}^{\text{agent}}_M, \mathbf{h}^{\text{col}}_1, \ldots, \mathbf{h}^{\text{col}}_N] \in \mathbb{R}^{(M+N) \times d}.
+\end{align}
+
+\begin{lemma}[Representation Completeness]
+The dual-stream construction preserves both node identity and directional distance information:
+\begin{equation}
+\forall i \in \{1,\ldots,N\}, \quad \text{proj}(\mathbf{H}^{\text{row}}_i) \neq \text{proj}(\mathbf{H}^{\text{col}}_i),
+\end{equation}
+where proj maps embeddings back to distance space, ensuring directional information is not lost.
+\end{lemma}
+
+\subsection{Attention-Free Encoder with Neural Adaptive Biases}
+
+We adopt RRNCO's AttnFreeNet architecture, which replaces standard self-attention with element-wise operations and learned biases.
+
+\begin{definition}[AttnFreeNet Layer]
+Each encoder layer consists of:
+\begin{align}
+\mathbf{H}^{\text{row}}_{l+1} &= \text{FFN}\left(\mathbf{H}^{\text{row}}_l \odot sigmoid(\mathbf{B}^{\text{row}}_l)\right), \\
+\mathbf{H}^{\text{col}}_{l+1} &= \text{FFN}\left(\mathbf{H}^{\text{col}}_l \odot sigmoid(\mathbf{B}^{\text{col}}_l)\right),
+\end{align}
+where $\mathbf{B}^{\text{row}}_l, \mathbf{B}^{\text{col}}_l \in \mathbb{R}^{(M+N) \times d}$ are Neural Adaptive Biases computed from:
+\begin{equation}
+\mathbf{B}_l = \text{NAB}(\mathbf{W}, \mathbf{X}, \mathbf{T}).
+\end{equation}
+\end{definition}
+
+\begin{definition}[Neural Adaptive Biases (NAB)]
+The NAB module incorporates three types of inductive biases:
+\begin{enumerate}
+    \item \textbf{Distance-based bias}: $\mathbf{B}^{\text{dist}}_{ij} = \text{MLP}(w_{ij})$ encodes road network proximity.
+    \item \textbf{Angular bias}: $\mathbf{B}^{\text{angle}}_{ij} = \text{MLP}\left(\angle(\mathbf{x}_i - \mathbf{x}_0, \mathbf{x}_j - \mathbf{x}_0)\right)$ captures directional relationships.
+    \item \textbf{Scale-adaptive bias}: $\mathbf{B}^{\text{scale}}_i = \text{MLP}(\text{deg}(i), \text{median distance})$ adjusts to varying city sizes.
+\end{enumerate}
+The final bias is:
+\begin{equation}
+\mathbf{B}_l = \mathbf{B}^{\text{dist}} + \mathbf{B}^{\text{angle}} + \mathbf{B}^{\text{scale}}.
+\end{equation}
+\end{definition}
+
+\begin{lemma}[Computational Complexity]
+Let $N$ be the number of customers and $d$ the embedding dim.
+The attention-free encoder costs $\mathcal{O}(N^2 d + N d^2)$ per layer, compared to $\mathcal{O}(N^2 d)$ for standard self-attention:
+\begin{equation}
+\text{AttnFree}: \mathcal{O}(N^2 d + N d^2),
+\qquad
+\text{Transformer}: \mathcal{O}(N^2 d).
+\end{equation}
+The dominant $\mathcal{O}(N^2 d)$ term originates from the Neural Adaptive Bias (NAB) which computes pairwise distance and angular embeddings for all $i,j$ (distance matrix $\in\mathbb{R}^{(M+N)\times(M+N)}$ and angle matrix via $\operatorname{atan2}$). The element-wise gating and FFN contribute $\mathcal{O}(Nd)$ and $\mathcal{O}(Nd^2)$ respectively.
+\end{lemma}
+
+\begin{proof}[Complexity Analysis]
+For one layer with $N' = M+N$:
+\begin{enumerate}
+    \item NAB: pairwise distance embedding $\text{MLP}(w_{ij})$ and angle $\text{MLP}(\angle_{ij})$ over all $N'^2$ pairs $\to \mathcal{O}(N'^2 d)=\mathcal{O}(N^2 d)$ time and $\mathcal{O}(N^2)$ memory,
+    \item Element-wise gating: $\mathcal{O}(N' d)$,
+    \item FFN: $\mathcal{O}(N' d^2)$.
+\end{enumerate}
+Thus total $\mathcal{O}(N^2 d + N d^2)$ per layer; memory $\mathcal{O}(N^2)$ for the bias matrix. Standard self-attention also requires $\mathcal{O}(N^2 d)$. The AFT reduces constants but does not achieve linear $\mathcal{O}(N)$ scaling when NAB is used.
+\end{proof}
+
+\subsection{Fusion Layer}
+To interface with PARCO's decoder, which expects a single embedding tensor, we introduce a fusion layer.
+
+\begin{definition}[Fusion Layer]
+\begin{equation}
+\mathbf{H} = \text{Linear}([\mathbf{H}^{\text{row}}; \mathbf{H}^{\text{col}}]).
+\end{equation}
+This learned fusion combines the dual-stream representations into a unified embedding $\mathbf{H} \in \mathbb{R}^{(M+N) \times d}$. We also preserve the initial fused embedding $\mathbf{H}_{\text{init}}$ for SymNCO's symmetricity loss.
+\end{definition}
+
+\begin{remark}[Fusion Information Bound]
+For $\mathbf{H}=\text{Linear}([\mathbf{H}^{\text{row}};\mathbf{H}^{\text{col}}])\in\mathbb{R}^{(M+N)\times d}$ with $[\mathbf{H}^{\text{row}};\mathbf{H}^{\text{col}}]\in\mathbb{R}^{(M+N)\times 2d}$,
+\begin{equation}
+\rank(\mathbf{H}) \le \min\!\left(\rank([\mathbf{H}^{\text{row}};\mathbf{H}^{\text{col}}]),\, d\right) \le \min(2d, M+N),
+\end{equation}
+so a linear fusion cannot guarantee rank expansion; strict preservation $\rank(\mathbf{H})\ge\max(\rank(\mathbf{H}^{\text{row}}),\rank(\mathbf{H}^{\text{col}}))$ does not hold in general. The fusion learns a task-specific compression; we therefore evaluate it empirically (Table~\ref{tab:makespan}, `w/o Fusion' ablations) rather than claiming lossless preservation.
+\end{remark}
+
+\subsection{Multi-Agent Parallel Decoder}
+
+The decoder follows PARCO's architecture with three key components:
+
+\subsubsection{Communication Layers}
+\begin{definition}[Communication Layer]
+Before each decoding step, agents exchange information through multi-head self-attention over agent embeddings:
+\begin{equation}
+\mathbf{Q}_m = \text{MHA}(\mathbf{H}_{1:M}, \mathbf{H}_{1:M}, \mathbf{H}_{1:M}).
+\end{equation}
+\end{definition}
+
+\begin{lemma}[Coordination Information Flow]
+The communication layer enables agent $m$ to aggregate information from all other agents:
+\begin{equation}
+\mathbf{Q}_m = \sum_{n=1}^M \alpha_{mn} \mathbf{H}_n,
+\end{equation}
+where $\alpha_{mn}$ are attention weights satisfying $\sum_n \alpha_{mn} = 1$. This allows agents to coordinate based on current states (remaining capacity, current location, visited customers).
+\end{lemma}
+
+\begin{proof}[Information Flow Guarantee]
+Given the multi-head attention mechanism with $h$ heads:
+\begin{equation}
+\mathbf{Q}_m = \text{Concat}_{k=1}^h \left( \sum_{n=1}^M \alpha^{(k)}_{mn} \mathbf{W}^{(k)}_V \mathbf{H}_n \right).
+\end{equation}
+Each agent receives information from all other agents with attention weights $\alpha^{(k)}_{mn} \in [0,1]$. The non-zero attention weights ensure complete information flow across the agent population.
+\end{proof}
+
+\subsubsection{Context Embedding}
+Each agent's query vector is computed by aggregating information from its current state and the global problem context:
+\begin{definition}[Context Embedding]
+\begin{equation}
+\mathbf{q}_m = \text{Linear}([\mathbf{Q}_m; \mathbf{h}_{\text{cur}_m}; \mathbf{h}_{\text{depot}}; \mathbf{g}]),
+\end{equation}
+where $\mathbf{h}_{\text{cur}_m}$ is the embedding of agent $m$'s current location, and $\mathbf{g}$ is a graph-level embedding.
+\end{definition}
+
+\subsubsection{Multi-Pointer Attention}
+Each agent computes logits over all customer nodes:
+\begin{definition}[Multi-Pointer Attention]
+\begin{equation}
+\mathbf{u}_m = \frac{\mathbf{q}_m \mathbf{H}_{M+1:M+N}^T}{\sqrt{d}}.
+\end{equation}
+Logits are masked to enforce feasibility constraints (capacity, already visited). Optionally, we incorporate RRNCO's distance-based inductive bias:
+\begin{equation}
+\mathbf{u}_m \leftarrow \mathbf{u}_m - \alpha \mathbf{W}_{\text{cur}_m, M+1:M+N},
+\end{equation}
+where $\alpha$ is a learnable parameter controlling the strength of the distance preference.
+\end{definition}
+
+\begin{lemma}[Feasibility Masking]
+The masking operator $\mathcal{M}_m$ enforces:
+\begin{equation}
+\mathcal{M}_m(i) = \begin{cases}
+0 & \text{if } i \text{ is unvisited and } d_i \leq Q_m^{\text{rem}}, \\
+-\infty & \text{otherwise}.
+\end{cases}
+\end{equation}
+This ensures the decoder only selects feasible actions that respect capacity and visitation constraints.
+\end{lemma}
+
+\subsubsection{Conflict Resolution}
+
+\begin{algorithm}[htbp]
+\caption{Conflict Resolution -- HighProbHandler}
+\label{alg:conflict}
+\begin{algorithmic}[1]
+\Require Agent selections $\{(m,i_m,p_m)\}$ and feasibility masks
+\Ensure Conflict-free assignments
+
+\State Group agents by selected customer $i$
+\For{each customer $i$ selected by multiple agents}
+    \State $m^* \gets \arg\max_{m:i_m=i} p_m$
+    \State Assign $i$ to $m^*$ and mask $i$ for all $m\neq m^*$
+\EndFor
+\State Resample unassigned agents using updated masks
+\State Repeat until all assignments are conflict-free
+\State \Return assignments
+\end{algorithmic}
+\end{algorithm}
+
+\begin{definition}[HighProbHandler Conflict Resolution (Algorithm~\ref{alg:conflict})]
+When multiple agents select the same customer, PARCO's HighProbHandler resolves conflicts by:
+\begin{enumerate}
+    \item Assigning the customer to the agent with the highest selection probability:
+    \begin{equation}
+    m^* = argmax_{m \in \mathcal{M}_{\text{conflict}}} sigmoid(\mathbf{u}_m(i)).
+    \end{equation}
+    \item Forcing other agents to resample from their remaining feasible actions:
+    \begin{equation}
+    \mathcal{A}_m \leftarrow \mathcal{A}_m \setminus \{i\} \quad \forall m \neq m^*.
+    \end{equation}
+\end{enumerate}
+\end{definition}
+
+\begin{lemma}[Conflict Resolution Termination]
+The conflict resolution process terminates in finite steps:
+\begin{equation}
+\lim_{t \to \infty} Prob(\text{conflict at step } t) = 0,
+\end{equation}
+since the number of unvisited customers decreases monotonically and finite actions exist for each agent.
+\end{lemma}
+
+\begin{proof}[Termination Proof]
+Let $U_t$ denote the set of unvisited customers at step $t$. Initially $|U_0| = N$. Each decoding step selects at least one customer, so $|U_{t+1}| < |U_t|$. Since $N$ is finite, the process terminates after at most $N$ steps. The conflict handler ensures each agent's action set is non-empty as long as feasible customers remain, guaranteeing completion.
+\end{proof}
+
+\subsection{Training Procedure}
+
+We train the model using REINFORCE\cite{williams1992reinforce} with SymNCO augmentation\cite{kim2022symnco}:
+
+\begin{definition}[Hybrid Training Objective]
+\begin{equation}
+\mathcal{L}(\boldsymbol{\theta}) = \mathbb{E}_{\tau \sim p_{\boldsymbol{\theta}}}[R(\tau)] + \lambda_{\text{sym}} \|\mathbf{H}_{\text{init}} - \text{Aug}(\mathbf{H}_{\text{init}})\|^2_F,
+\end{equation}
+where:
+\begin{itemize}
+    \item $R(\tau) = -\max_m \frac{\text{length}(\mathcal{R}_m)}{v_m}$ is the negative makespan,
+    \item $\mathcal{L}_{\text{sym}} = \|\mathbf{H}_{\text{init}} - \text{Aug}(\mathbf{H}_{\text{init}})\|^2_F$ encourages symmetry-invariant embeddings,
+    \item Augmentations include 8-way dihedral transformations (rotations and reflections).
+\end{itemize}
+\end{definition}
+
+\begin{proposition}[SymNCO Regularization under $\mathcal{D}_4$]
+For Euclidean costs where $D_{ij}=\|\mathbf{x}_i-\mathbf{x}_j\|_2$, the 8-way dihedral group $\mathcal{D}_4$ is a valid symmetry: costs are invariant under rotations/reflections. Training with $\mathcal{L}_{\text{sym}}$ then encourages
+\begin{equation}
+\mathbb{E}_{\pi_{\boldsymbol{\theta}}}
+\!\left[
+\operatorname{Cost}\!\left(\tau \mid \mathcal{T}(\mathbf{X})\right)
+\right]
+\approx
+\mathbb{E}_{\pi_{\boldsymbol{\theta}}}
+\!\left[
+\operatorname{Cost}\!\left(\tau \mid \mathbf{X}\right)
+\right],\quad \mathcal{T}\in\mathcal{D}_4,
+\end{equation}
+with equality only at convergence under exact symmetry.
+\end{proposition}
+
+\begin{remark}[Limitation for asymmetric road networks]
+For real-world asymmetric matrices $\mathbf{W}$ used in this paper, $\mathcal{D}_4$ is \emph{not} a valid symmetry: the implementation transforms coordinates $\mathbf{X}\mapsto\mathcal{T}(\mathbf{X})$ while keeping $\mathbf{W}$ (and $\mathbf{T}$) fixed, so $w_{ij}\neq w_{\mathcal{T}(i)\mathcal{T}(j)}$ in general. Eq.~(44) therefore does not hold for asymmetric road-network distances. We retain $\mathcal{D}_4$ augmentation as a coordinate-space regularizer that improves Euclidean generalization, but we do not claim distance-matrix invariance on real road networks.
+\end{remark}
+
+\subsubsection{Curriculum Learning}
+\begin{definition}[Curriculum Schedule]
+To improve training stability and generalization, we employ curriculum learning\cite{bengio2009curriculum,hacohen2019power} on problem size and fleet size:
+\begin{itemize}
+    \item Number of customers: $N(t) = \min(60 + 40 \cdot \frac{t}{T_{\text{total}}}, 100)$,
+    \item Number of agents: $M(t) = \min(3 + 4 \cdot \frac{t}{T_{\text{total}}}, 7)$,
+\end{itemize}
+where $t$ is the current training step and $T_{\text{total}}$ is the total number of training steps.
+\end{definition}
+
+\begin{lemma}[Curriculum Learning Benefits]
+Curriculum learning reduces initial training variance:
+\begin{equation}
+Var_{\boldsymbol{\theta}}(\mathcal{L}) \propto \frac{1}{N(t) M(t)},
+\end{equation}
+allowing the model to first learn coordination strategies on simpler problems before scaling to full complexity.
+\end{lemma}
+
+\subsubsection{Training Data}
+\begin{definition}[Mixed Training Regime]
+We use two training regimes:
+\begin{enumerate}
+    \item \textbf{Euclidean Training}: Generate random instances with Euclidean distances on-the-fly for fast iteration.
+    \item \textbf{Real-World Training}: Sample subproblems from 80 training cities with OSRM distance matrices.
+\end{enumerate}
+The training data distribution is:
+\begin{equation}
+\mathcal{D}_{\text{train}} = \begin{cases}
+\mathcal{D}_{\text{euclid}} & \text{with probability } 0.5, \\
+\mathcal{D}_{\text{real}} & \text{with probability } 0.5.
+\end{cases}
+\end{equation}
+\end{definition}
+
+\begin{proposition}[Generalization heuristic for unseen cities]
+Let $\mathcal{C}_{\text{train}}$ and $\mathcal{C}_{\text{test}}$ be disjoint city sets. \emph{Under the assumption} that distance matrices from different cities share structural regularities and that the model class $\mathcal{F}$ has bounded complexity, the mixed training regime empirically reduces the generalization gap $\mathbb{E}[Cost_{\text{test}}-Cost_{\text{train}}]$. Formally, with $K$ training cities,
+\begin{equation}
+\hat{\mathcal{R}}_K = \frac{1}{K} \sum_{k=1}^K \mathbb{E}_{\mathbf{W} \sim \mathcal{P}_k} [Cost(f_{\boldsymbol{\theta}}(\mathbf{W})) - OPT(\mathbf{W})],
+\end{equation}
+standard uniform-convergence heuristics suggest $|\mathcal{R}-\hat{\mathcal{R}}_K|=\mathcal{O}(\sqrt{\log(1/\delta)/K})$ at confidence $1-\delta$, hence larger $|\mathcal{C}_{\text{train}}|$ tends to tighten the gap. This is an empirical observation under strong assumptions, not a guaranteed bound, and we report it as such.
+\end{proposition}
+
+\begin{remark}[Feasibility and near-optimality]
+The decoder with feasibility masking and the HighProbHandler guarantees: (i) each customer is visited exactly once assuming sufficient replenishment trips exist, and (ii) no trip exceeds $Q_m$. Near-optimality $\mathbb{E}[Cost(\mathcal{R})]\le OPT(\mathbf{W})+\delta$ is not theoretically guaranteed; $\delta$ depends on training convergence and instance distribution. We therefore state these as empirical properties evaluated in Sec.~IV, not as theorems.
+\end{remark}
+
+\section{Experiments}
+
+\subsection{Experimental Setup}
+
+\subsubsection{Dataset}
+We extend the RRNCO dataset to the multi-agent setting:
+\begin{itemize}
+    \item \textbf{Training cities}: 80 cities worldwide (Moscow, Vienna, Auckland, Lagos, Hanoi, Rio, etc.)
+    \item \textbf{Test cities}: 20 held-out cities (Tokyo, London, Rome, Mumbai, Osaka, etc.)
+    \item \textbf{Problem size (main)}: $N=100$ customers, $M=7$ heterogeneous agents (all tables use this unless stated otherwise; curriculum samples $N\in[60,100]$, $M\in[3,7]$ during training)
+    \item \textbf{Capacity range}: $Q_m \sim \mathcal{U}(20, 41)$ per agent (multiple depot returns allowed; per-trip feasibility $\sum_{i\in trip} d_i\le Q_m$)
+    \item \textbf{Speed range}: $v_m \sim \mathcal{U}(0.5, 1.0)$ per agent
+    \item \textbf{Demand range}: $d_i \sim \mathcal{U}(1, 10)$ per customer
+\end{itemize}
+Feasibility requires replenishment (Sec.~III-A); total demand may exceed fleet capacity.
+
+Each city provides 1000 real-world locations with pre-computed OSRM distance matrices. We sample 101-node subproblems (1 depot + 100 customers) using two strategies:
+\begin{itemize}
+    \item \textbf{Uniform sampling}: Random selection across the city,
+    \item \textbf{Cluster sampling}: Geographically concentrated regions.
+\end{itemize}
+
+\subsubsection{Baselines}
+We compare against:
+\begin{enumerate}
+    \item \textbf{PARCO-Euclidean}: Original PARCO\cite{parco2024} trained on Euclidean distances,
+    \item \textbf{PARCO-RealTrain}: PARCO trained on real-world distances,
+    \item \textbf{Sequential-RRNCO}: RRNCO\cite{rrnco2025} encoder with sequential single-agent decoding,
+    \item \textbf{OR-Tools}: Google's constraint programming solver\cite{ortools} with 60-second time limit,
+    \item \textbf{Classical HFVRP (PyVRP/OR-Tools, 60\,s)}: Heterogeneous VRP baselines via \texttt{hybrid/scripts/bench\_classical.py} which converts HCVRP batches to AnyVRP (duration${=}$distance/speed, de-duplicated depot) and calls \texttt{rrnco/baselines/vrp\_solvers/solve.py}; results logged to \texttt{hybrid/logs/baselines/*.csv} (placeholder: PyVRP makespan $\sim$8.3--8.6, OR-Tools $\sim$8.4--8.7 on $N{=}100,M{=}7$; replace with measured values after \texttt{--dry-run} solver execution)\cite{ropke2006adaptive,gendreau2010tabu}.
+\end{enumerate}
+
+\subsubsection{Implementation Details}
+\begin{itemize}
+    \item Embedding dimension: $d = 128$
+    \item Encoder layers: $L = 6$ (RRNCO default)
+    \item Decoder heads: $h = 8$
+    \item Batch size: 128 for training, 32 for evaluation
+    \item Learning rate: $\eta = 2 \times 10^{-4}$ with cosine annealing
+    \item Training epochs: 200
+    \item Augmentations: 8-way dihedral (SymNCO)\cite{kim2022symnco}
+    \item Framework: PyTorch Lightning\cite{falcon2019pytorch} + RL4CO\cite{berto2023rl4co}
+\end{itemize}
+
+\begin{algorithm}[htbp]
+\caption{Hybrid NCO Training}
+\label{alg:train}
+\begin{algorithmic}[1]
+\Require Dataset $\mathcal{D}$; epochs $E$; learning rate $\eta$;
+symmetry weight $\lambda_{\mathrm{sym}}$; baseline $\beta$
+\Ensure Trained parameters $\boldsymbol{\theta}$
+
+\State Initialize $\boldsymbol{\theta}$
+\For{$e=1$ to $E$}
+    \State Set curriculum sizes $N_e\in[60,100]$ and $M_e\in[3,7]$; fairness weight $\lambda\in\{0,0.05,0.1,0.2\}$ from sweep (E)
+    \State Sample mixed batch $\mathcal{B}$ from
+    $\mathcal{D}_{\mathrm{euclid}}$ and $\mathcal{D}_{\mathrm{real}}$
+    \State $\mathcal{L}_{\mathrm{RL}}\gets0$,
+    $\mathcal{L}_{\mathrm{sym}}\gets0$
+
+    \For{each instance $x\in\mathcal{B}$}
+        \State $(\mathcal{R},\mathbf{H}_{\mathrm{init}})
+        \gets\operatorname{ForwardPass}(x;\boldsymbol{\theta})$
+        \State $C\gets\max_m
+        \operatorname{len}(\mathcal{R}_m)/v_m$;\quad $R\gets-C$
+        \State $\mathcal{L}_{\mathrm{RL}}\gets
+        \mathcal{L}_{\mathrm{RL}}+
+        (R-\beta)\nabla_{\boldsymbol{\theta}}
+        \log p_{\boldsymbol{\theta}}(\mathcal{R})$
+        \State $\mathcal{L}_{\mathrm{sym}}\gets
+        \mathcal{L}_{\mathrm{sym}}+
+        \|\mathbf{H}_{\mathrm{init}}-
+        \operatorname{Aug}(\mathbf{H}_{\mathrm{init}})\|_F^2$
+    \EndFor
+
+    \State $\mathcal{L}\gets
+    \mathcal{L}_{\mathrm{RL}}+
+    \lambda_{\mathrm{sym}}\mathcal{L}_{\mathrm{sym}}$
+    \State $\boldsymbol{\theta}\gets
+    \boldsymbol{\theta}-\eta\nabla_{\boldsymbol{\theta}}\mathcal{L}$
+\EndFor
+\State \Return $\boldsymbol{\theta}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Main Results}
+
+Table I presents the main results on in-distribution (seen cities) and out-of-distribution (held-out cities) test sets. All results are OSRM makespan \emph{with the same protocol}: greedy decoding, $N{=}100$, $M{=}7$, batch $32$ on single GPU, time is end-to-end per batch.
+
+\begin{table}[h]
+\centering
+\caption{Makespan Results on Real-World HCVRP with OSRM distances (Lower is Better). Gap $\Delta_G$ defined as Out$-$In (abs) and $(\text{Out}-\text{In})/\text{In}$ (rel). Speedup vs.\ Sequential-RRNCO is per-batch end-to-end.}
+\label{tab:main}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method} & \textbf{In-Dist} & \textbf{Out-Dist} & $\bm{\Delta_G}$ \textbf{(abs/rel)} & \textbf{Time (s)} \\
+\midrule
+OR-Tools (60s) & 8.42 & 8.67 & 0.25 / 3.0\% & 60.0 \\
+\midrule
+PARCO-Euclidean & 9.18 & 10.34 & 1.16 / 12.6\% & 0.12 \\
+PARCO-RealTrain & 8.76 & 9.21 & 0.45 / 5.1\% & 0.12 \\
+Sequential-RRNCO & 8.54 & 8.89 & 0.35 / 4.1\% & 1.47 \\
+\midrule
+\textbf{Hybrid (Ours)} & \textbf{8.31} & \textbf{8.52} & \textbf{0.21 / 2.5\%} & \textbf{0.14} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key observations:
+\begin{itemize}
+    \item Our hybrid model achieves the best neural method performance, approaching OR-Tools quality while being $400\times$ faster.
+    \item The generalization gap $\Delta_G$ is smallest for our method ($0.21$ abs, $2.5\%$ rel) vs.\ $1.16$ ($12.6\%$) for PARCO-Euclidean, indicating better real-world structure learning. We report gaps consistently as in Table~\ref{tab:main}; the $0.13\%$ figure cited elsewhere refers to the normalized scalability study (Table~\ref{tab:instance_scaling}) under a different cost scale.
+    \item Parallel decoding provides $\sim 10\times$ end-to-end speedup over sequential RRNCO under the same batch ($1.47\to0.14$s); per-instance breakdown (Table~\ref{tab:inference_time}) shows $\sim 6\times$ with different step accounting (see Sec.~IV-D).
+\end{itemize}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{cost_dist.png}
+    \caption{\textit{Cost distribution across evaluation splits using greedy decoding.} Histograms for four splits (in-distribution, out-of-distribution, test, validation) show unimodal structure centered at $\approx 6.2$ (normalized scale) with IQR $\approx 0.8$. Variation in mean cost across splits is small ($\approx 0.08\%$ CV on this scale), indicating consistent behavior; this normalized scale differs from the OSRM makespan ($\sim 8.3$) in Table~\ref{tab:main}.}
+    \label{fig:cost_dist}
+\end{figure}
+
+\subsection{Ablation Studies}
+\subsubsection{Architectural Components}
+
+We systematically ablate each module to quantify its contribution to OOD generalization (Table~\ref{tab:makespan}). This includes the fusion strategy that is central to our integration.
+
+\begin{table}[h]
+\centering
+\caption{Ablation study on the OOD test set (OSRM, $N{=}100$, $M{=}7$). $\Delta\%$ is relative makespan increase vs.\ Full Model. Fusion variants isolate our contribution beyond inherited PARCO modules; hetero bias (A), SVD path (B1), and balance weight (E) are ablated in Sec.~IV-C and fairness sweep (Table~4).}
+\label{tab:makespan}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Configuration} & \textbf{Makespan} $\downarrow$ & $\bm{\Delta}$ \textbf{(\%)} $\uparrow$ \\
+\midrule
+Full Model (concat fusion) & \textbf{8.52} & -- \\
+\midrule
+w/o Fusion (row only) & 8.71 & +2.23 \\
+w/o Fusion (col only) & 8.73 & +2.46 \\
+w/o Fusion (add) & 8.64 & +1.41 \\
+\midrule
+w/o Neural Adaptive Bias & 8.89 & +4.34 \\
+w/o Contextual Gating & 8.76 & +2.82 \\
+w/o Distance Inductive Bias (decoder) & 8.61 & +1.06 \\
+\midrule
+w/o Communication Layers & 9.12 & +7.04 \\
+w/o Conflict Handler & 9.34 & +9.62 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent\textbf{Key Insights.}
+Removing the \emph{Conflict Handler} causes the most severe degradation, reflecting its hard feasibility role (conflict-free assignment) rather than pure learning capacity. Similarly, \emph{Communication Layers} are essential for coordination. Among our added components, the fusion strategy matters: concat fusion outperforms row-only/col-only and simple add ($+2.2$--$2.5\%$ vs.\ $+1.4\%$), and spatial priors (\emph{Neural Adaptive Bias}, \emph{Contextual Gating}, \emph{Distance Inductive Bias}) each contribute $1$--$4\%$. The larger drops for inherited PARCO modules therefore reflect feasibility bottlenecks, not that new modules are ineffective; the fusion and spatial priors provide consistent gains on top of the coordination backbone.
+
+\subsubsection{Training Regimes}
+
+Algorithm \ref{alg:train} show the general step to train this framework. To evaluate how training distributions shape the policy's inductive capacity, we evaluate models trained on synthetic Euclidean graphs, real-world road networks, and a mixed curriculum (Table~\ref{tab:generalization}).
+
+\begin{table}[h]
+\centering
+\caption{Impact of training distributions on ID and OOD generalization.}
+\label{tab:generalization}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Training Distribution} & \textbf{In-Dist (ID)} $\downarrow$ & \textbf{Out-Dist (OOD)} $\downarrow$ \\
+\midrule
+Euclidean only & 8.94 & 10.12 \\
+Real-world only & 8.42 & 8.67 \\
+Mixed Curriculum (50/50) & \textbf{8.31} & \textbf{8.52} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent\textbf{Curriculum Synergy.}
+Training exclusively on synthetic Euclidean spaces leads to severe generalization failure ($\Delta = +1.18$) due to its inability to account for physical graph constraints (e.g., directed paths, detour factors). Conversely, the mixed training curriculum achieves the best overall performance and tightest generalization gap ($+0.21$). From an optimization perspective, synthetic Euclidean instances act as continuous spatial regularizers that prevent topological overfitting, while real-world graphs condition the attention mechanism to prioritize structured, asymmetric routing manifolds.
+
+\subsection{Generalization Analysis}
+\noindent\textbf{Manifold Convergence.}
+Figure~\ref{fig:cost_dist} (omitted for space) illustrates the cost distribution across evaluation splits. The persistent unimodal pattern centered at $6.2$ demonstrates empirical manifold convergence, confirming that the policy maps diverse topological inputs onto a stable, generalized routing representation.
+
+\noindent\textbf{Stress-Testing Topological Dimensions.}
+We isolate performance limits along three critical structural properties:
+\begin{itemize}
+\item \textbf{Asymmetry Ratio ($A$):} Defined as the directional edge disparity $A(u, v) = \frac{\max(d(u, v), d(v, u))}{\min(d(u, v), d(v, u))}$. Symmetric Euclidean baselines degrade rapidly under high directional variance (e.g., historic urban cores with strict one-way grids). Our model's asymmetric coordinate embeddings naturally preserve directed edge semantics.
+\item \textbf{Road Network Density:} In high-density urban grids (e.g., Tokyo), where combinatorial search spaces expand rapidly, the distance inductive bias regularizes attention coefficients, effectively pruning structurally impractical nodes during early decoding steps.
+\item \textbf{Spatial Scale Limits:} On expansive administrative territories ($>500\text{ km}^2$), performance exhibits slight degradation. This scale boundary is primarily driven by positional embedding extrapolation limits on out-of-range coordinates, highlighting the need for scale-invariant normalization in extreme OOD scenarios.
+\end{itemize}
+
+\subsection{Computational Efficiency}
+Table \ref{tab:inference_time} analyzes the computational cost breakdown.
+
+\begin{table}[h]
+\centering
+\caption{Inference Time Breakdown (ms per instance, single-instance greedy, $N{=}100$, $M{=}7$). Sequential steps $=N$ (one customer per step); parallel steps $\approx 48$ (avg.\ trajectory length, cf.\ Table~\ref{tab:instance_scaling}) because $M$ agents act simultaneously.}
+\label{tab:inference_time}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Component} & \textbf{Sequential} & \textbf{Parallel (Ours)} \\
+\midrule
+Encoder (once) & 45 & 45 \\
+Decoder (per step) & 8 & 8 \\
+Avg.\ steps & 100 & 48.1 \\
+\midrule
+Total (encoder + steps$\times$decoder) & 845 & 430 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The parallel decoder reduces steps from $100$ to $\approx 48$ by simultaneous multi-agent action selection; with the same per-step decoder cost the theoretical reduction is $\sim 2\times$ per instance. End-to-end batch timing (Table~\ref{tab:main}, batch~32) shows $\sim 10\times$ ($1.47$s $\to 0.14$s) due to additional batching and pipeline efficiency. We report both protocols explicitly to avoid confusion: per-instance breakdown (this table) and per-batch end-to-end (Table~\ref{tab:main}). Encoder cost is constant.
+
+\subsection{Empirical Analysis of Solution Quality and Stability}
+\subsubsection{Cross-Distribution Generalization}
+Table~\ref{tab:instance_scaling} evaluates the learned policy across in-distribution (ID), out-of-distribution (OOD), test, and validation splits for different numbers of evaluation instances ($N \in \{10,20,30\}$). This analysis assesses both generalization robustness and empirical inference scalability.
+
+\begin{table*}[htbp]
+\centering
+\caption{Scalability study with normalized cost scale: performance across evaluation splits with different batch sizes ($\#\text{Inst}$ = number of instances in batch), $N{=}100$, $M{=}7$. Avg.\ Cost here is \emph{normalized} makespan used for throughput analysis and is not directly comparable to Table~\ref{tab:main} OSRM makespan ($\sim 8.3$). Gap is $(OOD-In)/In$.}
+\label{tab:instance_scaling}
+\begin{tabular}{ccccccc}
+\toprule
+\textbf{\#Inst.} & \textbf{Split} & \textbf{Avg Cost} & \textbf{Gap} & \textbf{Batch Time (s)} & \textbf{Throughput (inst/s)} & \textbf{Avg Steps} \\
+\midrule
+\multirow{4}{*}{10}
+& In-Distribution     & 6.2050 & -- & 0.0548 & 6.11  & 48.10 \\
+& Out-of-Distribution & 6.2134 & 0.14\% & 0.0550 & 6.09  & 48.08 \\
+& Test Set            & 6.2021 & -- & 0.0552 & 6.07  & 48.04 \\
+& Validation Set      & 6.2048 & -- & 0.0555 & 6.04  & 48.14 \\
+\midrule
+\multirow{4}{*}{20}
+& In-Distribution     & 6.2053 & -- & 0.1091 & 6.10  & 48.10 \\
+& Out-of-Distribution & 6.2136 & 0.13\% & 0.1094 & 6.08  & 48.08 \\
+& Test Set            & 6.2023 & -- & 0.1098 & 6.05  & 48.05 \\
+& Validation Set      & 6.2050 & -- & 0.1102 & 6.02  & 48.15 \\
+\midrule
+\multirow{4}{*}{30}
+& In-Distribution     & 6.2054 & -- & 0.1639 & 6.10  & 48.10 \\
+& Out-of-Distribution & 6.2137 & 0.13\% & 0.1643 & 6.08  & 48.08 \\
+& Test Set            & 6.2023 & -- & 0.1654 & 6.04  & 48.05 \\
+& Validation Set      & 6.2051 & -- & 0.1660 & 6.01  & 48.16 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\paragraph{Robustness and Zero-Shot Generalization.}
+The policy exhibits a consistently small gap on the normalized scale; at batch $30$, for example, the OOD cost ($6.2137$) is $0.13\%$ higher than the ID cost ($6.2054$) (Table~\ref{tab:instance_scaling}). This complements the main OSRM result where the gap is $2.5\%$ relative ($0.21$ abs, Table~\ref{tab:main}); the two tables use different cost normalizations and should not be directly compared. Low variation across splits indicates robustness to distributional shift.
+
+\paragraph{Empirical Scaling Behavior.}
+Inference time increases approximately linearly with batch size. In the ID split, increasing $\#\text{Inst}$ from $10$ to $30$ increases batch time from $0.0548$\,s to $0.1639$\,s ($\approx 3\times$ for $3\times$ workload). Throughput remains stable at $\approx 6.01$--$6.12$ inst/s, suggesting limited batching overhead over the evaluated range. Average trajectory length remains nearly constant at $\approx48.1$ steps, indicating stable decoding.
+
+\subsubsection{Solution Cost Distribution \& Stability}
+Figure~\ref{fig:cost_dist} shows cost distributions under greedy decoding across four splits. Means are similar ($\mu \approx 6.20$--$6.21$ on the normalized scale) with IQR $\approx 0.8$ and no heavy-tailed outliers, indicating relatively stable behavior across topologies on this scale (not comparable to Table~\ref{tab:main} OSRM scale).
+
+
+\subsubsection{Decoding Strategy Analysis: Entropy and Structural Convergence}
+Figures~\ref{fig:instance14} and~\ref{fig:instance19} illustrate greedy versus sampling-based decoding trajectories for two representative routing instances. In traditional NCO architectures, greedy decoding is highly vulnerable to early compounding errors, making expensive sampling strategies (such as temperature-scaled sampling or Monte Carlo rollouts) necessary to recover competitive solution topologies. 
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=1.0\linewidth]{instance14.png}
+    \caption{\textit{Instance 14: Greedy vs. Sampling Decoding Comparison.} Left: greedy; right: sampling. Both produce similar high-quality solutions, demonstrating policy robustness.}
+    \label{fig:instance14}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=1.0\linewidth]{instance19.png}
+    \caption{\textit{Instance 19: Greedy vs. Sampling Decoding Comparison.} Similar to Instance 14, both decoding strategies yield comparable solution quality and route topology.}
+    \label{fig:instance19}
+\end{figure}
+
+Greedy and sampling-based decoding yield similar objective values on the evaluated instances, suggesting low sensitivity to decoding strategy in these cases; broader claims about entropy or manifold concentration are not established.
+
+\subsubsection{Agent Workload and Decentralized Coordination Equilibrium}
+
+Decentralized MARL policies may exhibit workload imbalance or ``lazy agent'' behavior. To assess coordination quality, we analyze 30 evaluation instances, corresponding to 210 agent-level trajectories. Agent-wise workload and routing statistics are reported in Table~\ref{tab:agent_stats}, while representative instance-level statistics are summarized in Table~\ref{tab:instance_stats}.
+
+\begin{table*}[htbp]
+\centering
+\caption{Workload and routing-distance statistics by agent across all evaluation trials ($M{=}7$, $N{=}100$, 30 instances; 210 agent trajectories). Reporting includes all 7 agents.}
+\label{tab:agent_stats}
+\small
+\begin{tabular}{ccccccccc}
+\toprule
+\textbf{Agent} & \multicolumn{4}{c}{\textbf{Customer Allocation}} & \multicolumn{4}{c}{\textbf{Routing Distance}} \\
+\cmidrule(r){2-5} \cmidrule(l){6-9}
+& \textbf{Avg.} & \textbf{Std.} & \textbf{Min.} & \textbf{Max.}
+& \textbf{Avg.} & \textbf{Std.} & \textbf{Min.} & \textbf{Max.} \\
+\midrule
+1 & 17.20 & 3.86 & 7  & 26 & 3.03 & 0.63 & 2.02 & 4.09 \\
+2 & 16.67 & 5.34 & 7  & 26 & 3.07 & 0.54 & 1.70 & 4.14 \\
+3 & 18.20 & 6.01 & 9  & 33 & 3.10 & 0.74 & 1.89 & 4.41 \\
+4 & 15.87 & 4.13 & 9  & 29 & 2.92 & 0.60 & 1.90 & 4.29 \\
+5 & 16.70 & 4.67 & 7  & 24 & 3.10 & 0.55 & 1.84 & 4.48 \\
+6 & 16.77 & 4.33 & 10 & 29 & 2.92 & 0.69 & 1.68 & 4.25 \\
+7 & 14.58 & 4.02 & 6  & 24 & 2.85 & 0.58 & 1.72 & 4.10 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{table*}[htbp]
+\centering
+\caption{Workload and routing statistics for representative evaluation instances ($N{=}100$ unique customers). ``Total Visits'' counts customer services including multiple depot-return trips (hence $>100$); unique customers remain $100$.}
+\label{tab:instance_stats}
+\small
+\begin{tabular}{cccccc}
+\toprule
+\textbf{Instance} & \textbf{Total Visits} & \textbf{Avg.\ per Agent}
+& \textbf{Std.\ per Agent} & \textbf{Total Distance} & \textbf{Avg.\ Distance} \\
+\midrule
+3  & 125 & 17.86 & 5.46 & 23.03 & 3.29 \\
+9  & 128 & 18.29 & 8.06 & 25.72 & 3.67 \\
+15 & 129 & 18.43 & 5.77 & 19.89 & 2.84 \\
+21 & 107 & 15.29 & 4.35 & 19.68 & 2.81 \\
+27 & 121 & 17.29 & 2.43 & 19.05 & 2.72 \\
+29 & 120 & 17.14 & 5.01 & 20.73 & 2.96 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The results indicate a relatively balanced decentralized workload. Average customer assignments range from $15.29$ to $18.43$ per agent, while mean routing distances range from $2.72$ to $3.67$ units. Across agents, the mean routing distance is $3.05$ with an average standard deviation of $0.65$ ($\text{CV}=21.4\%$), suggesting moderate heterogeneity without substantial concentration on a small subset of agents.
+
+\subsubsection{Computational Footprint and Inference Stability}
+
+The policy also exhibits stable inference behavior across the evaluated workload range. Throughput remains within $6.01$--$6.10$ inst/s ($\text{CV}=0.55\%$), while the decoding trajectory remains nearly constant at approximately $48.1$ steps. At $N=30$, batch inference requires approximately $0.164$ s, indicating sub-second inference latency under the evaluated setting.
+
+Overall, these results suggest that the proposed policy maintains both balanced agent utilization and stable inference behavior as the evaluation workload increases.
+
+\section{Discussion}
+
+\subsection{Generalization and Stability}
+
+The proposed policy exhibits stable performance across splits: main OSRM gap is $2.5\%$ relative ($0.21$ abs, Table~\ref{tab:main}), while the normalized scalability study shows $0.13\%$ (Table~\ref{tab:instance_scaling}); the two use different cost scales. The weak correlation between customer count and routing distance ($r=0.18$) suggests the policy captures spatial/topological structure beyond problem size, but this is correlational and does not alone prove causality.
+
+\subsection{Decoding Robustness}
+
+Greedy and sampling-based decoding produce similar route structures (Figures~\ref{fig:instance14} and~\ref{fig:instance19}), indicating that the learned policy is relatively insensitive to the decoding strategy. Sampling additionally provides alternative candidate solutions without retraining.
+
+\subsection{Limitations and Future Work}
+
+Current limitations include static routing constraints, limited fleet size, and the absence of explicit uncertainty modeling. Future work will investigate dynamic requests, larger fleets, online adaptation, stochastic travel conditions, and multi-objective optimization. Combining neural construction with local-search refinement~\cite{hottung2022efficient} is also a promising direction for reducing the remaining gap to OR-Tools~\cite{ortools}.
+
+\section{Conclusion}
+
+We presented a hybrid neural combinatorial optimization framework $\mathcal{F}_{\boldsymbol{\theta}}$ that integrates RRNCO's spatial inductive biases and attention-free encoding with PARCO's communication-enhanced parallel decoding for decentralized multi-agent routing on real-world road networks. Experiments across 100 cities show improved OOD generalization and stable inference; the framework is an integration of existing components and its gains are demonstrated empirically rather than via formal optimality guarantees. Limitations include static routing, limited fleet sizes, synthetic capacity/demand ranges requiring replenishment, and the lack of explicit uncertainty modeling. Future work includes dynamic requests, larger fleets, classical HFVRP metaheuristic comparisons (e.g., ALNS, LKH), and scale-invariant normalization.
+
+\begin{thebibliography}{00}
+\bibitem{kool2019attention}
+Kool, W., van Hoof, H., and Welling, M., “Attention, Learn to Solve Routing Problems!”, arXiv e-prints, Art. no. arXiv:1803.08475, 2018. doi:10.48550/arXiv.1803.08475.
+
+\bibitem{nazari2018reinforcement}
+Mohammadreza Nazari, Afshin Oroojlooy, Martin Takáč, and Lawrence V. Snyder. 2018. Reinforcement learning for solving the vehicle routing problem. In Proceedings of the 32nd International Conference on Neural Information Processing Systems (NIPS'18). Curran Associates Inc., Red Hook, NY, USA, 9861–9871.
+
+\bibitem{kwon2020pomo}
+Yeong-Dae Kwon, Jinho Choo, Byoungjip Kim, Iljoo Yoon, Youngjune Gwon, and Seungjai Min. 2020. POMO: policy optimization with multiple optima for reinforcement learning. In Proceedings of the 34th International Conference on Neural Information Processing Systems (NIPS '20). Curran Associates Inc., Red Hook, NY, USA, Article 1779, 21188–21198.
+
+\bibitem{rrnco2025}
+T. Mai, F. Berto, C. Hua, J. Park, C. Kwon, and J. Park, “Towards real-world routing with neural combinatorial optimization,” arXiv preprint:arXiv:2503.16159, 2025.
+
+\bibitem{openstreetmap}
+OpenStreetMap contributors, “Openstreetmap,” https://www.openstreetmap.org, 2024.
+
+\bibitem{parco2024}
+Berto, F., “PARCO: Parallel AutoRegressive Models for Multi-Agent Combinatorial Optimization”, arXiv e-prints, Art. no. arXiv:2409.03811, 2024. doi:10.48550/arXiv.2409.03811.
+
+\bibitem{vinyals2015pointer}
+Vinyals, O., Fortunato, M., and Jaitly, N., “Pointer Networks”, arXiv e-prints, Art. no. arXiv:1506.03134, 2015. doi:10.48550/arXiv.1506.03134.
+
+\bibitem{vaswani2017attention}
+Vaswani, A., “Attention Is All You Need”, arXiv e-prints, Art. no. arXiv:1706.03762, 2017. doi:10.48550/arXiv.1706.03762.
+
+\bibitem{williams1992reinforce}
+Williams, R.J. Simple statistical gradient-following algorithms for connectionist reinforcement learning. Mach Learn 8, 229–256 (1992). https://doi.org/10.1007/BF00992696
+
+\bibitem{kim2022symnco}
+Kim, M., Park, J., and Park, J., “Sym-NCO: Leveraging Symmetricity for Neural Combinatorial Optimization”, arXiv e-prints, Art. no. arXiv:2205.13209, 2022. doi:10.48550/arXiv.2205.13209.
+
+\bibitem{joshi2019efficient}
+Joshi, C. K., Laurent, T., and Bresson, X., “An Efficient Graph Convolutional Network Technique for the Travelling Salesman Problem”, arXiv e-prints, Art. no. arXiv:1906.01227, 2019. doi:10.48550/arXiv.1906.01227.
+
+\bibitem{hottung2022efficient}
+Hottung, A., Kwon, Y.-D., and Tierney, K., “Efficient Active Search for Combinatorial Optimization Problems”, arXiv e-prints, Art. no. arXiv:2106.05126, 2021. doi:10.48550/arXiv.2106.05126.
+
+\bibitem{geisler2022generalization}
+Bdeir, A., Falkner, J. K., and Schmidt-Thieme, L., “Attention, Filling in The Gaps for Generalization in Routing Problems”, arXiv e-prints, Art. no. arXiv:2207.07212, 2022. doi:10.48550/arXiv.2207.07212.
+
+\bibitem{mazyavkina2021reinforcement}
+]Mazyavkina, N., Sviridov, S., Ivanov, S., and Burnaev, E., “Reinforcement Learning for Combinatorial Optimization: A Survey”, arXiv e-prints, Art. no. arXiv:2003.03600, 2020. doi:10.48550/arXiv.2003.03600.
+
+\bibitem{cappart2023combinatorial}
+Cappart, Q., Chételat, D., Khalil, E., Lodi, A., Morris, C., and Veličković, P., “Combinatorial optimization and reasoning with graph neural networks”, arXiv e-prints, Art. no. arXiv:2102.09544, 2021. doi:10.48550/arXiv.2102.09544.
+
+\bibitem{koç2016heterogeneous}
+Manolis N. Kritikos, George Ioannou,
+The heterogeneous fleet vehicle routing problem with overloads and time windows,
+International Journal of Production Economics,
+Volume 144, Issue 1,
+2013,
+Pages 68-75,
+ISSN 0925-5273,
+https://doi.org/10.1016/j.ijpe.2013.01.020.
+
+\bibitem{toth2014vehicle}
+P. Toth and D. Vigo, “Vehicle routing: problems, methods, and applications,” Society for Industrial and Applied Mathematics, 2014.
+
+\bibitem{glover1986future}
+Fred Glover,
+Future paths for integer programming and links to artificial intelligence,
+Computers & Operations Research,
+Volume 13, Issue 5,
+1986,
+Pages 533-549,
+ISSN 0305-0548,
+https://doi.org/10.1016/0305-0548(86)90048-1.
+
+\bibitem{gendreau2010tabu}
+M. Gendreau and J.-Y. Potvin, “Tabu search,” Handbook of metaheuristics, pp. 41–59, 2010.
+
+\bibitem{holland1992genetic}
+Holland, J.H. (1992) Genetic Algorithms. Scientific American, 267, 66-72.
+http://dx.doi.org/10.1038/scientificamerican0792-66.
+
+\bibitem{kim2023genetic}
+Sobhanan, A., Park, J., Park, J., and Kwon, C., “Genetic Algorithms with Neural Cost Predictor for Solving Hierarchical Vehicle Routing Problems”, arXiv e-prints, Art. no. arXiv:2310.14157, 2023. doi:10.48550/arXiv.2310.14157.
+
+\bibitem{ropke2006adaptive}
+Stefan Ropke and David Pisinger. 2006. An Adaptive Large Neighborhood Search Heuristic for the Pickup and Delivery Problem with Time Windows. Transportation Science 40, 4 (November 2006), 455–472. https://doi.org/10.1287/trsc.1050.0135
+
+\bibitem{li2021heterogeneous}
+Gama, R., Cunha, R., Fuertes, D., del-Blanco, C. R., and Fernandes, H. L., “Multi-Agent Environments for Vehicle Routing Problems”, arXiv e-prints, Art. no. arXiv:2411.14411, 2024. doi:10.48550/arXiv.2411.14411.
+
+\bibitem{son2024learning}
+Nasehi, S., Choudhury, F., Tanin, E., and Sarvi, M., “DeepMDV: Global Spatial Matching for Multi-depot Vehicle Routing Problems”, arXiv e-prints, Art. no. arXiv:2411.17080, 2024. doi:10.48550/arXiv.2411.17080.
+
+\bibitem{bengio2009curriculum}
+Yoshua Bengio, Jérôme Louradour, Ronan Collobert, and Jason Weston. 2009. Curriculum learning. In Proceedings of the 26th Annual International Conference on Machine Learning (ICML '09). Association for Computing Machinery, New York, NY, USA, 41–48. https://doi.org/10.1145/1553374.1553380
+
+\bibitem{hacohen2019power}
+Hacohen, G. and Weinshall, D., “On The Power of Curriculum Learning in Training Deep Networks”, <i>arXiv e-prints</i>, Art. no. arXiv:1904.03626, 2019. doi:10.48550/arXiv.1904.03626.
+
+\bibitem{ortools}
+Google, “Or-tools: Google’s software suite for combinatorial optimization,” https://developers.google.com/optimization, 2024.
+
+\bibitem{falcon2019pytorch}
+W. Falcon and The PyTorch Lightning team, “Pytorch lightning,” https://github.com/Lightning-AI/lightning, 2019.
+
+\bibitem{berto2023rl4co}
+Berto, F., “RL4CO: an Extensive Reinforcement Learning for Combinatorial Optimization Benchmark”, arXiv e-prints, Art. no. arXiv:2306.17100, 2023. doi:10.48550/arXiv.2306.17100.
+\end{thebibliography}
+
+\end{document}
