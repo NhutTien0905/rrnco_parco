@@ -15,10 +15,17 @@ Training loop (inherited from PARCORLModule):
 import torch
 import torch.nn as nn
 
+from random import randint
 from torch.optim.lr_scheduler import LinearLR, SequentialLR
 from typing import Any, Optional
 
 from rl4co.envs.common.base import RL4COEnvBase
+from rl4co.models.zoo.symnco.losses import (
+    invariance_loss,
+    problem_symmetricity_loss,
+    solution_symmetricity_loss,
+)
+from rl4co.utils.ops import unbatchify
 from rl4co.utils.pylogger import get_pylogger
 
 from parco.models.rl import PARCORLModule
@@ -258,15 +265,6 @@ class HybridRLModule(PARCORLModule):
           loss to prevent premature policy collapse.
         - Multi-start: activates ``loss_ps`` when ``num_starts > 1``.
         """
-        from random import randint
-
-        from rl4co.data.transforms import StateAugmentation
-        from rl4co.models.zoo.symnco.losses import (
-            invariance_loss,
-            problem_symmetricity_loss,
-            solution_symmetricity_loss,
-        )
-        from rl4co.utils.ops import unbatchify
 
         # ── Agent / size resampling (curriculum) ─────────────────
         if phase == "train":
@@ -312,18 +310,24 @@ class HybridRLModule(PARCORLModule):
         # ── Policy forward ───────────────────────────────────────
         # Pass num_starts only during training so the policy actually
         # performs multi-start decoding (expands the batch internally).
-        # VRAM optimize: micro-batch over aug dimension when n_aug>2
-        if phase == "train" and n_aug > 2 and getattr(self, "micro_batch_aug", 0):
-            mb = self.micro_batch_aug if isinstance(self.micro_batch_aug, int) else 2
-            if isinstance(mb, bool):
-                mb = 2
+        # VRAM optimize: forward-chunk over aug dimension.
+        # shortcut: forward-chunked only, single loss/backward on concatenated
+        # tensors — peak backward still B*n_aug. Upgrade to per-chunk
+        # manual_backward (requires Lightning automatic_optimization=False) when
+        # n_aug > 4 and backward OOM observed. ADR: forward chunking saves
+        # encoder/decoder forward activations; backward saving deferred.
+        if phase == "train" and n_aug > 1 and getattr(self, "micro_batch_aug", 0):
+            # normalize micro_batch_aug: 0=off, int in [1, n_aug) = chunk size in aug units
+            mb_raw = self.micro_batch_aug
+            mb = int(mb_raw) if isinstance(mb_raw, int) and not isinstance(mb_raw, bool) else 2
             if 0 < mb < n_aug:
-                # td batch is [B_orig * n_aug]; split into chunks of B_orig*mb
-                # need B_orig from pre-augment batch
-                B_orig = batch.batch_size[0] if hasattr(batch, "batch_size") else td.batch_size[0] // n_aug
+                # capture B_orig before augment; fallback to td // n_aug if batch not TensorDict
+                try:
+                    B_orig = int(batch.batch_size[0])
+                except Exception:
+                    B_orig = int(td.batch_size[0] // n_aug)
                 chunk_B = B_orig * mb
-                # handle n_start expansion (policy expands internally, so chunk first then policy expands)
-                total = td.batch_size[0]
+                total = int(td.batch_size[0])
                 n_chunks = (total + chunk_B - 1) // chunk_B
                 outs = []
                 for i in range(n_chunks):
@@ -336,38 +340,23 @@ class HybridRLModule(PARCORLModule):
                         return_init_embeds=True,
                     )
                     outs.append(out_c)
-                # merge outs: concat tensors along batch dim, keep non-tensor as-is
+                # merge outs: concat tensors along batch dim; TensorDict via torch.cat
                 out = {}
                 for k in outs[0].keys():
                     v0 = outs[0][k]
                     if isinstance(v0, torch.Tensor):
                         out[k] = torch.cat([o[k] for o in outs], dim=0)
-                    elif isinstance(v0, type(td)):  # TensorDict final_td
-                        out[k] = outs[0][k]  # keep first; diagnostic only uses first chunk shape
+                    elif hasattr(v0, "batch_size"):  # TensorDict (final_td, etc.)
                         try:
-                            from tensordict import TensorDict
-
-                            # try cat if possible
-                            out[k] = torch.cat([o[k] for o in outs], dim=0) if hasattr(outs[0][k], "batch_size") else outs[0][k]
+                            out[k] = torch.cat([o[k] for o in outs], dim=0)
                         except Exception:
                             out[k] = outs[0][k]
                     else:
                         out[k] = outs[0][k]
-                # final_td: concatenate along batch dim if TensorDict
+                # final_td for diagnostics: prefer concatenated full batch; fallback to first chunk
                 if "final_td" in outs[0] and outs[0]["final_td"] is not None:
-                    try:
-                        # TensorDict cat via torch.cat works if same keys
-                        import torch as _torch
-
-                        ftds = [o["final_td"] for o in outs]
-                        # use TensorDict.cat-like: stack then reshape is complex; keep first for logging
-                        out["final_td"] = ftds[0]
-                        # attempt cat
-                        try:
-                            out["final_td"] = _torch.cat(ftds, dim=0) if isinstance(ftds[0], _torch.Tensor) else ftds[0]
-                        except Exception:
-                            pass
-                    except Exception:
+                    if "final_td" not in out or out["final_td"] is outs[0]["final_td"]:
+                        # already handled above; if cat failed it is first chunk (biased diagnostic)
                         pass
             else:
                 out = self.policy(
