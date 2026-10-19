@@ -67,6 +67,7 @@ class HybridEncoder(nn.Module):
         use_pos_token: bool = False,
         trainable_pos_token: bool = True,
         fusion_type: str = "concat",
+        use_checkpoint: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -91,7 +92,9 @@ class HybridEncoder(nn.Module):
             normalization=normalization,
             nab_type=nab_type,
             use_duration_matrix=False,  # HCVRP has no duration matrix
+            use_checkpoint=use_checkpoint,
         )
+        self.use_checkpoint = use_checkpoint
 
         # ── Fusion: dual-stream → single-stream ─────────────────────────
         if fusion_type == "concat":

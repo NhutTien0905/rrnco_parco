@@ -19,6 +19,7 @@ generator_params:
 
 # Model hyperparameters
 model:
+  micro_batch_aug: 2
   policy:
     _target_: "hybrid.models.policy.HybridPolicy"
     env_name: "${env.name}"
@@ -30,6 +31,7 @@ model:
     normalization_encoder: "instance"
     agent_handler: "highprob"
     use_distance_bias: true
+    use_checkpoint: true
     context_embedding_kwargs:
       normalization: "rms"
       norm_after: false

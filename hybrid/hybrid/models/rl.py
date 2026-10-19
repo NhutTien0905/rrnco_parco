@@ -155,12 +155,15 @@ class HybridRLModule(PARCORLModule):
         entropy_coeff: float = 0.01,
         # ── LR warmup ────────────────────────────────────────────
         warmup_epochs: int = 1,
+        # ── VRAM optimize ────────────────────────────────────────
+        micro_batch_aug: int = 0,
         # ── Rest ─────────────────────────────────────────────────
         **kwargs,
     ):
         self.reward_shaping_coeff = reward_shaping_coeff
         self.entropy_coeff = entropy_coeff
         self.warmup_epochs = warmup_epochs
+        self.micro_batch_aug = micro_batch_aug
         # Build default policy if none provided
         if policy is None:
             log.info("Building default HybridPolicy for HybridRLModule")
@@ -239,6 +242,9 @@ class HybridRLModule(PARCORLModule):
                 "monitor": self.lr_scheduler_monitor,
             }
 
+    def optimizer_zero_grad(self, epoch, batch_idx, optimizer):
+        optimizer.zero_grad(set_to_none=True)
+
     def shared_step(
         self, batch: Any, batch_idx: int, phase: str, dataloader_idx: int = None
     ):
@@ -306,13 +312,79 @@ class HybridRLModule(PARCORLModule):
         # ── Policy forward ───────────────────────────────────────
         # Pass num_starts only during training so the policy actually
         # performs multi-start decoding (expands the batch internally).
-        out = self.policy(
-            td,
-            self.env,
-            phase=phase,
-            num_starts=n_start if phase == "train" else 1,
-            return_init_embeds=True,
-        )
+        # VRAM optimize: micro-batch over aug dimension when n_aug>2
+        if phase == "train" and n_aug > 2 and getattr(self, "micro_batch_aug", 0):
+            mb = self.micro_batch_aug if isinstance(self.micro_batch_aug, int) else 2
+            if isinstance(mb, bool):
+                mb = 2
+            if 0 < mb < n_aug:
+                # td batch is [B_orig * n_aug]; split into chunks of B_orig*mb
+                # need B_orig from pre-augment batch
+                B_orig = batch.batch_size[0] if hasattr(batch, "batch_size") else td.batch_size[0] // n_aug
+                chunk_B = B_orig * mb
+                # handle n_start expansion (policy expands internally, so chunk first then policy expands)
+                total = td.batch_size[0]
+                n_chunks = (total + chunk_B - 1) // chunk_B
+                outs = []
+                for i in range(n_chunks):
+                    chunk = td[i * chunk_B : (i + 1) * chunk_B]
+                    out_c = self.policy(
+                        chunk,
+                        self.env,
+                        phase=phase,
+                        num_starts=n_start,
+                        return_init_embeds=True,
+                    )
+                    outs.append(out_c)
+                # merge outs: concat tensors along batch dim, keep non-tensor as-is
+                out = {}
+                for k in outs[0].keys():
+                    v0 = outs[0][k]
+                    if isinstance(v0, torch.Tensor):
+                        out[k] = torch.cat([o[k] for o in outs], dim=0)
+                    elif isinstance(v0, type(td)):  # TensorDict final_td
+                        out[k] = outs[0][k]  # keep first; diagnostic only uses first chunk shape
+                        try:
+                            from tensordict import TensorDict
+
+                            # try cat if possible
+                            out[k] = torch.cat([o[k] for o in outs], dim=0) if hasattr(outs[0][k], "batch_size") else outs[0][k]
+                        except Exception:
+                            out[k] = outs[0][k]
+                    else:
+                        out[k] = outs[0][k]
+                # final_td: concatenate along batch dim if TensorDict
+                if "final_td" in outs[0] and outs[0]["final_td"] is not None:
+                    try:
+                        # TensorDict cat via torch.cat works if same keys
+                        import torch as _torch
+
+                        ftds = [o["final_td"] for o in outs]
+                        # use TensorDict.cat-like: stack then reshape is complex; keep first for logging
+                        out["final_td"] = ftds[0]
+                        # attempt cat
+                        try:
+                            out["final_td"] = _torch.cat(ftds, dim=0) if isinstance(ftds[0], _torch.Tensor) else ftds[0]
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+            else:
+                out = self.policy(
+                    td,
+                    self.env,
+                    phase=phase,
+                    num_starts=n_start if phase == "train" else 1,
+                    return_init_embeds=True,
+                )
+        else:
+            out = self.policy(
+                td,
+                self.env,
+                phase=phase,
+                num_starts=n_start if phase == "train" else 1,
+                return_init_embeds=True,
+            )
 
         # Unbatchify reward to [batch_size, n_start, n_aug]
         reward = unbatchify(out["reward"], (n_start, n_aug))
