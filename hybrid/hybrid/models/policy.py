@@ -76,6 +76,7 @@ class HybridPolicy(PARCOPolicy):
         normalization_encoder: str = "instance",
         init_embedding_kwargs: Optional[dict] = None,
         fusion_type: str = "concat",
+        use_checkpoint: bool = False,
         # ── PARCO decoder kwargs ─────────────────────────────────────
         agent_handler: str = "highprob",
         use_distance_bias: bool = True,
@@ -99,6 +100,7 @@ class HybridPolicy(PARCOPolicy):
                 use_pos_token=use_pos_token,
                 trainable_pos_token=trainable_pos_token,
                 fusion_type=fusion_type,
+                use_checkpoint=use_checkpoint,
             )
 
         # Build hybrid decoder if not provided

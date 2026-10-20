@@ -15,10 +15,17 @@ Training loop (inherited from PARCORLModule):
 import torch
 import torch.nn as nn
 
+from random import randint
 from torch.optim.lr_scheduler import LinearLR, SequentialLR
 from typing import Any, Optional
 
 from rl4co.envs.common.base import RL4COEnvBase
+from rl4co.models.zoo.symnco.losses import (
+    invariance_loss,
+    problem_symmetricity_loss,
+    solution_symmetricity_loss,
+)
+from rl4co.utils.ops import unbatchify
 from rl4co.utils.pylogger import get_pylogger
 
 from parco.models.rl import PARCORLModule
@@ -155,12 +162,21 @@ class HybridRLModule(PARCORLModule):
         entropy_coeff: float = 0.01,
         # ── LR warmup ────────────────────────────────────────────
         warmup_epochs: int = 1,
+        # ── VRAM optimize ────────────────────────────────────────
+        micro_batch_aug: int = 0,
         # ── Rest ─────────────────────────────────────────────────
         **kwargs,
     ):
         self.reward_shaping_coeff = reward_shaping_coeff
         self.entropy_coeff = entropy_coeff
         self.warmup_epochs = warmup_epochs
+        self.micro_batch_aug = micro_batch_aug
+        if micro_batch_aug == 2 and num_augment > 4:
+            log.warning(
+                "micro_batch_aug=2 with n_aug=%d: forward-chunked only, backward still B*n_aug; "
+                "consider micro_batch_aug=1 or per-chunk manual_backward if backward OOM",
+                num_augment,
+            )
         # Build default policy if none provided
         if policy is None:
             log.info("Building default HybridPolicy for HybridRLModule")
@@ -239,6 +255,9 @@ class HybridRLModule(PARCORLModule):
                 "monitor": self.lr_scheduler_monitor,
             }
 
+    def optimizer_zero_grad(self, epoch, batch_idx, optimizer):
+        optimizer.zero_grad(set_to_none=True)
+
     def shared_step(
         self, batch: Any, batch_idx: int, phase: str, dataloader_idx: int = None
     ):
@@ -252,15 +271,6 @@ class HybridRLModule(PARCORLModule):
           loss to prevent premature policy collapse.
         - Multi-start: activates ``loss_ps`` when ``num_starts > 1``.
         """
-        from random import randint
-
-        from rl4co.data.transforms import StateAugmentation
-        from rl4co.models.zoo.symnco.losses import (
-            invariance_loss,
-            problem_symmetricity_loss,
-            solution_symmetricity_loss,
-        )
-        from rl4co.utils.ops import unbatchify
 
         # ── Agent / size resampling (curriculum) ─────────────────
         if phase == "train":
@@ -306,13 +316,70 @@ class HybridRLModule(PARCORLModule):
         # ── Policy forward ───────────────────────────────────────
         # Pass num_starts only during training so the policy actually
         # performs multi-start decoding (expands the batch internally).
-        out = self.policy(
-            td,
-            self.env,
-            phase=phase,
-            num_starts=n_start if phase == "train" else 1,
-            return_init_embeds=True,
-        )
+        # VRAM optimize: forward-chunk over aug dimension.
+        # shortcut: forward-chunked only, single loss/backward on concatenated
+        # tensors — peak backward still B*n_aug. Upgrade to per-chunk
+        # manual_backward (requires Lightning automatic_optimization=False) when
+        # n_aug > 4 and backward OOM observed. ADR: forward chunking saves
+        # encoder/decoder forward activations; backward saving deferred.
+        if phase == "train" and n_aug > 1 and getattr(self, "micro_batch_aug", 0):
+            # normalize micro_batch_aug: 0=off, int in [1, n_aug) = chunk size in aug units
+            mb_raw = self.micro_batch_aug
+            mb = int(mb_raw) if isinstance(mb_raw, int) and not isinstance(mb_raw, bool) else 2
+            if 0 < mb < n_aug:
+                # capture B_orig before augment; fallback to td // n_aug if batch not TensorDict
+                try:
+                    B_orig = int(batch.batch_size[0])
+                except Exception:
+                    B_orig = int(td.batch_size[0] // n_aug)
+                chunk_B = B_orig * mb
+                total = int(td.batch_size[0])
+                n_chunks = (total + chunk_B - 1) // chunk_B
+                outs = []
+                for i in range(n_chunks):
+                    chunk = td[i * chunk_B : (i + 1) * chunk_B]
+                    out_c = self.policy(
+                        chunk,
+                        self.env,
+                        phase=phase,
+                        num_starts=n_start,
+                        return_init_embeds=True,
+                    )
+                    outs.append(out_c)
+                # merge outs: concat tensors along batch dim; TensorDict via torch.cat
+                out = {}
+                for k in outs[0].keys():
+                    v0 = outs[0][k]
+                    if isinstance(v0, torch.Tensor):
+                        out[k] = torch.cat([o[k] for o in outs], dim=0)
+                    elif hasattr(v0, "batch_size"):  # TensorDict (final_td, etc.)
+                        try:
+                            out[k] = torch.cat([o[k] for o in outs], dim=0)
+                        except Exception:
+                            out[k] = outs[0][k]
+                    else:
+                        out[k] = outs[0][k]
+                # final_td for diagnostics: prefer concatenated full batch; fallback to first chunk
+                if "final_td" in outs[0] and outs[0]["final_td"] is not None:
+                    if "final_td" not in out or out["final_td"] is outs[0]["final_td"]:
+                        # already handled above; if cat failed it is first chunk (biased diagnostic)
+                        pass
+            else:
+                out = self.policy(
+                    td,
+                    self.env,
+                    phase=phase,
+                    num_starts=n_start if phase == "train" else 1,
+                    return_init_embeds=True,
+                )
+        else:
+            out = self.policy(
+                td,
+                self.env,
+                phase=phase,
+                num_starts=n_start if phase == "train" else 1,
+                return_init_embeds=True,
+            )
 
         # Unbatchify reward to [batch_size, n_start, n_aug]
         reward = unbatchify(out["reward"], (n_start, n_aug))
@@ -349,9 +416,11 @@ class HybridRLModule(PARCORLModule):
             )
 
             # ── loss_ss (augmentation symmetricity) ─────────────
-            # reward: [B, n_start, n_aug] — average over n_aug (dim=2)
+            # reward: [B, n_start, n_aug] when n_start>1 else [B, n_aug] — dim depends
+            # fix: when n_start is 0/1, reward is 2D [B, n_aug] so dim=1; when 3D, dim=2
+            _ss_dim = 2 if n_start > 1 else 1
             loss_ss = (
-                solution_symmetricity_loss(shaped_reward, ll, dim=2)
+                solution_symmetricity_loss(shaped_reward, ll, dim=_ss_dim)
                 if n_aug > 1
                 else 0
             )
@@ -457,8 +526,30 @@ class HybridRLModule(PARCORLModule):
             )
 
         # ── 1. Distance bias alpha (learnable parameter) ─────────
+        # Hetero: alpha_net outputs per-agent [B,m] alpha; log its mean
         decoder = self.policy.decoder
-        if hasattr(decoder, "alpha") and hasattr(decoder, "use_distance_bias"):
+        if hasattr(decoder, "alpha_net") and getattr(decoder, "use_distance_bias", False):
+            try:
+                if "agents_capacity" in td.keys() and "agents_speed" in td.keys():
+                    cap, spd = td["agents_capacity"], td["agents_speed"]
+                elif "capacity" in td.keys() and "speed" in td.keys():
+                    cap, spd = td["capacity"], td["speed"]
+                else:
+                    cap = spd = None
+                if cap is not None:
+                    with torch.no_grad():
+                        feat = torch.stack([cap.float(), spd.float()], dim=-1)  # [B,m,2]
+                        alphas = decoder.alpha_net(feat).squeeze(-1).abs()  # [B,m]
+                        _log("distance_bias/alpha", alphas.mean())
+                else:
+                    _log("distance_bias/alpha", decoder.alpha_net[2].bias.data.mean())
+            except Exception:
+                # Fallback: mean of last bias param
+                try:
+                    _log("distance_bias/alpha", decoder.alpha_net[2].bias.data.mean())
+                except Exception:
+                    pass
+        elif hasattr(decoder, "alpha") and hasattr(decoder, "use_distance_bias"):
             _log("distance_bias/alpha", decoder.alpha.data.mean())
 
         # ── 2. Per-agent tour stats ──────────────────────────────
@@ -488,6 +579,31 @@ class HybridRLModule(PARCORLModule):
             ratio = max_time / (mean_time + 1e-8)
             _log("agents/time_ratio", ratio)
 
+            # ── Workload balance metrics (Solution 1 monitoring) ──
+            # Coefficient of variation: std / mean (scale-invariant balance measure)
+            cv = std_time / (mean_time + 1e-8)  # [B]
+            _log("balance/time_cv", cv)
+
+            # Max/min ratio: how many times busier is the busiest vs least busy agent
+            max_min_ratio = max_time / (min_time + 1e-8)  # [B]
+            _log("balance/time_max_min_ratio", max_min_ratio)
+
+            # Balance penalty value (what actually gets added to reward)
+            if hasattr(self.env, "balance_weight") and self.env.balance_weight > 0:
+                balance_penalty = self.env.balance_weight * std_time  # [B]
+                _log("balance/penalty", balance_penalty)
+                _log("balance/weight", self.env.balance_weight)
+
+        # ── 2b. Per-agent visit count stats ──────────────────────
+        if "num_visits_per_agent" in td.keys():
+            visits = td["num_visits_per_agent"]  # [B, m]
+            _log("balance/visits_mean", visits.mean(dim=1))
+            _log("balance/visits_std", visits.std(dim=1))
+            _log("balance/visits_max", visits.max(dim=1)[0])
+            _log("balance/visits_min", visits.min(dim=1)[0])
+            visits_cv = visits.std(dim=1) / (visits.mean(dim=1) + 1e-8)
+            _log("balance/visits_cv", visits_cv)
+
         # ── 3. Decode steps ──────────────────────────────────────
         if "steps" in out:
             _log("decode/steps", float(out["steps"]))
@@ -502,6 +618,35 @@ class HybridRLModule(PARCORLModule):
                 customer_visited = visited[..., num_agents:] if visited.shape[-1] > num_agents else visited
                 visited_ratio = customer_visited.float().mean()
                 _log("decode/visited_ratio", visited_ratio, prog=(phase != "train"))
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        """Allow loading old checkpoints with ``policy.decoder.alpha``.
+
+        Old checkpoints have a single scalar ``alpha``; new code has ``alpha_net``.
+        We migrate here so ``HybridRLModule.load_from_checkpoint(..., strict=False)``
+        is not required — but if strict=True and old key present, we still load
+        with strict=False and seed ``alpha_net`` bias from the old value.
+        """
+        # Lightning checkpoints nest under "state_dict" already unwrapped by caller;
+        # at module level keys look like "policy.decoder.alpha".
+        has_old = any(k.endswith("decoder.alpha") for k in state_dict.keys())
+        has_new = any("decoder.alpha_net" in k for k in state_dict.keys())
+        if has_old and not has_new:
+            # Pop old alpha keys and seed new decoder's alpha_net bias
+            old_keys = [k for k in list(state_dict.keys()) if k.endswith("decoder.alpha")]
+            for k in old_keys:
+                old_alpha = state_dict.pop(k)
+                try:
+                    old_val = float(old_alpha.mean().item()) if hasattr(old_alpha, "mean") else float(old_alpha)
+                except Exception:
+                    old_val = 1.0
+                try:
+                    with torch.no_grad():
+                        self.policy.decoder.alpha_net[2].bias.fill_(old_val)
+                except Exception:
+                    pass
+            return super().load_state_dict(state_dict, strict=False)
+        return super().load_state_dict(state_dict, strict=strict)
 
     def on_before_optimizer_step(self, optimizer):
         """Log gradient norms before optimizer step.

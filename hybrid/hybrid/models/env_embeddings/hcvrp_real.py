@@ -10,6 +10,9 @@ For customer nodes (last N nodes):
 Returns dual-stream (row_emb, col_emb, distance_matrix) for AttnFreeNet.
 """
 
+import glob
+import os
+
 import torch
 import torch.nn as nn
 
@@ -54,6 +57,9 @@ class HybridInitEmbedding(nn.Module):
         use_polar_feats: bool = True,
         sample_type: str = "prob",
         sample_size: int = 25,
+        use_svd: bool = True,
+        svd_cache_dir: str = "data/dataset",
+        svd_k: int = 8,
         **kwargs,
     ):
         super().__init__()
@@ -61,6 +67,12 @@ class HybridInitEmbedding(nn.Module):
         self.demand_scaler = demand_scaler
         self.speed_scaler = speed_scaler
         self.use_polar_feats = use_polar_feats
+        self.use_svd = use_svd
+        self.svd_cache_dir = svd_cache_dir
+        self.svd_k = svd_k
+        self._svd_cache: dict = {}
+        self._svd_found_path: str | None = None
+        self._svd_search_done: bool = False
 
         # ── Depot/Agent embedding (PARCO-style) ──────────────────────────
         # depot_locs [B, m, 2] → Linear → [B, m, H]
@@ -88,6 +100,9 @@ class HybridInitEmbedding(nn.Module):
             sample_type=sample_type,
             sample_size=sample_size,
         )
+
+        # SVD low-rank path: k=8 → 2*k=16 → embed_dim
+        self.svd_proj = nn.Linear(2 * self.svd_k, embed_dim, linear_bias)
 
         # ContextualGating: fuse coordinate + distance embeddings
         self.gating_network_row = ContextualGating(embed_dim)
@@ -167,34 +182,109 @@ class HybridInitEmbedding(nn.Module):
         # Take only customer part for gating (depot handled above)
         customer_coord_emb = coord_emb_full[:, 1:, :]  # [B, N, H]
 
-        # DistanceExpert on customer submatrix
+        # ── Distance / SVD embedding (B1) ────────────────────────────────
         # Extract customer-to-customer submatrix [B, N, N]
         customer_dist = td["distance_matrix"][
             ..., num_agents:, num_agents:
         ]  # [B, N, N]
-
-        # Pad distance matrix if N < sample_size (can happen with
-        # curriculum sampling of small problem sizes).  DistanceExpert's
-        # Linear layers expect exactly sample_size input features, so we
-        # pad columns/rows with zeros and let the sorted-gather still work.
         N = customer_dist.size(-1)
-        sample_size = self.distance_expert.sample_size
-        if N < sample_size:
-            pad_n = sample_size - N
-            # Pad both dims: [B, N, N] → [B, N+pad, N+pad]
-            customer_dist = torch.nn.functional.pad(
-                customer_dist, (0, pad_n, 0, pad_n), value=0.0
-            )
 
-        # DistanceExpert → (row_dist_emb, col_dist_emb), each [B, N_padded, H]
-        row_dist_emb, col_dist_emb = self.distance_expert(
-            customer_dist, phase
-        )
+        # Try SVD path first: td["svd_emb"] or cache file
+        svd_emb = None
+        if "svd_emb" in td.keys():
+            raw = td["svd_emb"]
+            # raw expected [B, N, 2*k] or [B, m+N, 2*k]; slice if needed
+            if raw.shape[-2] != N:
+                # full m+N case → keep last N rows
+                if raw.shape[-2] == num_agents + N:
+                    raw = raw[..., num_agents:, :]
+                else:
+                    raw = raw[..., :N, :]
+            # ensure shape [..., 2*k]
+            if raw.shape[-1] == 2 * self.svd_k:
+                svd_emb = self.svd_proj(raw.to(device=device, dtype=torch.float32))
+        elif self.use_svd:
+            # cache lookup: try td["city"] or generic svd_k*.npz under cache dir
+            # if td carries city name, use city-specific cache
+            city_name = None
+            if "city" in td.keys():
+                try:
+                    c = td["city"]
+                    if isinstance(c, (list, tuple)):
+                        city_name = c[0]
+                    elif torch.is_tensor(c):
+                        city_name = str(c[0].item()) if c.numel() == 1 else None
+                    else:
+                        city_name = str(c)
+                except Exception:
+                    city_name = None
+            # memoize candidate discovery after first hit to avoid per-forward glob
+            if self._svd_search_done and self._svd_found_path is not None:
+                found = self._svd_found_path if os.path.isfile(self._svd_found_path) else None
+            else:
+                candidate_paths = []
+                if city_name is not None:
+                    candidate_paths.append(
+                        os.path.join(self.svd_cache_dir, city_name, f"svd_k{self.svd_k}.npz")
+                    )
+                candidate_paths.append(os.path.join(self.svd_cache_dir, f"svd_k{self.svd_k}.npz"))
+                if not self._svd_search_done:
+                    glob_candidates = glob.glob(
+                        os.path.join(self.svd_cache_dir, "*", f"svd_k{self.svd_k}.npz")
+                    )
+                    candidate_paths.extend(glob_candidates)
+                else:
+                    # reuse previously discovered glob result (no new glob)
+                    if self._svd_found_path is not None:
+                        candidate_paths.append(self._svd_found_path)
+                found = None
+                for p in candidate_paths:
+                    if os.path.isfile(p):
+                        found = p
+                        break
+                if found is not None:
+                    self._svd_found_path = found
+                    self._svd_search_done = True
+                elif not self._svd_search_done:
+                    # remember negative if glob was attempted and nothing found; still mark searched
+                    # so next forward without city_name skips glob re-scan
+                    self._svd_search_done = True
+            if found is not None:
+                # memoize loaded array per path to avoid per-step IO
+                if found not in self._svd_cache:
+                    try:
+                        import numpy as np
 
-        # Trim back to original N if we padded
-        if N < sample_size:
-            row_dist_emb = row_dist_emb[:, :N, :]
-            col_dist_emb = col_dist_emb[:, :N, :]
+                        d = np.load(found, allow_pickle=True)
+                        U_S = d["U_S"]  # [Nc, k]
+                        V_S = d["V_S"]  # [Nc, k]
+                        full = np.concatenate([U_S, V_S], axis=-1)  # [Nc, 2k]
+                        self._svd_cache[found] = torch.from_numpy(full).float()
+                    except Exception:
+                        self._svd_cache[found] = None
+                cached = self._svd_cache.get(found, None)
+                if cached is not None and cached.shape[0] >= N:
+                    raw = cached[:N].unsqueeze(0).expand(customer_dist.shape[0], -1, -1)
+                    raw = raw.to(device=device)
+                    svd_emb = self.svd_proj(raw)
+
+        if svd_emb is not None:
+            # svd_emb [B, N, H] used for both row/col streams (VRAM-friendly)
+            row_dist_emb = svd_emb
+            col_dist_emb = svd_emb
+        else:
+            # Fallback: DistanceExpert with padding for N < sample_size
+            sample_size = self.distance_expert.sample_size
+            dist_input = customer_dist
+            if N < sample_size:
+                pad_n = sample_size - N
+                dist_input = torch.nn.functional.pad(
+                    dist_input, (0, pad_n, 0, pad_n), value=0.0
+                )
+            row_dist_emb, col_dist_emb = self.distance_expert(dist_input, phase)
+            if N < sample_size:
+                row_dist_emb = row_dist_emb[:, :N, :]
+                col_dist_emb = col_dist_emb[:, :N, :]
 
         # ContextualGating: fuse coordinate + distance
         fused_row = self.gating_network_row(
